@@ -5,6 +5,7 @@
 import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import { formatEdgeRate, formatEdgeVolume } from "../core/voice";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -540,6 +541,207 @@ function voiceSection(): HTMLElement {
     void save();
   });
 
+  const responseModeSelect = h("select", {}) as HTMLSelectElement;
+  responseModeSelect.append(
+    h("option", { value: "concise", text: "Concise (Fast, ~1s summary)" }),
+    h("option", { value: "full", text: "Full Response" }),
+  );
+  responseModeSelect.value = settings.voiceResponseMode || "concise";
+  responseModeSelect.addEventListener("change", () => {
+    settings.voiceResponseMode = responseModeSelect.value as "concise" | "full";
+    void save();
+  });
+
+  const deviceSelect = h("select", { style: "flex:1 1 auto;min-width:0" }) as HTMLSelectElement;
+
+  async function refreshInputDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter((d) => d.kind === "audioinput");
+      clear(deviceSelect);
+
+      const defaultOption = h("option", { value: "", text: "Default Microphone" }) as HTMLOptionElement;
+      deviceSelect.append(defaultOption);
+
+      audioInputs.forEach((device, idx) => {
+        const label = device.label || `Microphone ${idx + 1}`;
+        const opt = h("option", { value: device.deviceId, text: label }) as HTMLOptionElement;
+        deviceSelect.append(opt);
+      });
+
+      deviceSelect.value = settings.voiceInputDevice || "";
+    } catch (err) {
+      console.error("Failed to enumerate audio devices", err);
+    }
+  }
+
+  deviceSelect.addEventListener("change", () => {
+    settings.voiceInputDevice = deviceSelect.value;
+    void save();
+  });
+
+  navigator.mediaDevices?.addEventListener("devicechange", () => void refreshInputDevices());
+  void refreshInputDevices();
+
+  const boostLabel = h("span", { class: "hint", text: `${(settings.voiceMicGain ?? 2.0).toFixed(1)}x Boost` });
+  const boostSlider = h("input", {
+    type: "range",
+    min: "1.0",
+    max: "5.0",
+    step: "0.2",
+    value: String(settings.voiceMicGain ?? 2.0),
+  }) as HTMLInputElement;
+  boostSlider.addEventListener("input", () => {
+    const val = Number(boostSlider.value) || 2.0;
+    settings.voiceMicGain = val;
+    boostLabel.textContent = `${val.toFixed(1)}x Boost`;
+    void save();
+  });
+
+  const testMicBtn = h("button", { text: "Test Mic" }) as HTMLButtonElement;
+  const micMeterBar = h("div", { class: "mic-meter-bar" }) as HTMLElement;
+  const micMeter = h("div", { class: "mic-meter" }, micMeterBar) as HTMLElement;
+  const micStatusLabel = h("span", { class: "hint", text: "Ready to test" }) as HTMLElement;
+
+  let testMicStream: MediaStream | null = null;
+  let testAudioCtx: AudioContext | null = null;
+  let testAnimFrame: number | null = null;
+  let testTimeout: number | null = null;
+  let testStartTime = 0;
+  let hasHeardSpeech = false;
+
+  function stopMicTest() {
+    if (testAnimFrame !== null) {
+      cancelAnimationFrame(testAnimFrame);
+      testAnimFrame = null;
+    }
+    if (testTimeout !== null) {
+      window.clearTimeout(testTimeout);
+      testTimeout = null;
+    }
+    if (testMicStream) {
+      testMicStream.getTracks().forEach((track) => track.stop());
+      testMicStream = null;
+    }
+    if (testAudioCtx) {
+      void testAudioCtx.close();
+      testAudioCtx = null;
+    }
+    testMicBtn.textContent = "Test Mic";
+    testMicBtn.classList.remove("danger");
+    micMeterBar.style.width = "0%";
+  }
+
+  async function startMicTest() {
+    stopMicTest();
+    testMicBtn.textContent = "Stop Test";
+    testMicBtn.classList.add("danger");
+    micStatusLabel.textContent = "Listening...";
+    testStartTime = Date.now();
+    hasHeardSpeech = false;
+
+    try {
+      const constraints: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: false,
+        autoGainControl: true,
+      };
+      if (settings.voiceInputDevice && settings.voiceInputDevice !== "default") {
+        constraints.deviceId = { exact: settings.voiceInputDevice };
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+      testMicStream = stream;
+
+      void refreshInputDevices();
+
+      const audioCtx = new AudioContext();
+      testAudioCtx = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.value = settings.voiceMicGain || 2.0;
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(gainNode);
+      gainNode.connect(analyser);
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      const tick = () => {
+        if (!testMicStream || !testAudioCtx) return;
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / dataArray.length;
+        const pct = Math.min(100, Math.round((avg / 128) * 100));
+        micMeterBar.style.width = `${pct}%`;
+
+        if (pct > 10) {
+          hasHeardSpeech = true;
+          micStatusLabel.textContent = `Volume: ${pct}% (Clear)`;
+        } else if (!hasHeardSpeech && Date.now() - testStartTime > 2000) {
+          micStatusLabel.textContent = `Volume: ${pct}% (Signal very low, check mute)`;
+        } else if (hasHeardSpeech) {
+          micStatusLabel.textContent = `Volume: ${pct}%`;
+        }
+
+        testAnimFrame = requestAnimationFrame(tick);
+      };
+
+      testAnimFrame = requestAnimationFrame(tick);
+
+      testTimeout = window.setTimeout(() => {
+        stopMicTest();
+        micStatusLabel.textContent = "Test complete";
+      }, 8000);
+    } catch (err) {
+      stopMicTest();
+      micStatusLabel.textContent = `Mic error: ${String(err)}`;
+    }
+  }
+
+  testMicBtn.addEventListener("click", () => {
+    if (testMicStream) {
+      stopMicTest();
+      micStatusLabel.textContent = "Stopped";
+    } else {
+      void startMicTest();
+    }
+  });
+
+  window.addEventListener("beforeunload", () => stopMicTest());
+
+  const speedLabel = h("span", { class: "hint", text: `${(settings.voiceSpeed ?? 1.0).toFixed(2)}x` });
+  const speedSlider = h("input", {
+    type: "range",
+    min: "0.8",
+    max: "1.5",
+    step: "0.05",
+    value: String(settings.voiceSpeed ?? 1.0),
+  }) as HTMLInputElement;
+  speedSlider.addEventListener("input", () => {
+    const val = Number(speedSlider.value) || 1.0;
+    settings.voiceSpeed = val;
+    speedLabel.textContent = `${val.toFixed(2)}x`;
+    void save();
+  });
+
+  const volumeLabel = h("span", { class: "hint", text: `${Math.round((settings.voiceVolume ?? 1.0) * 100)}%` });
+  const volumeSlider = h("input", {
+    type: "range",
+    min: "0.1",
+    max: "1.0",
+    step: "0.05",
+    value: String(settings.voiceVolume ?? 1.0),
+  }) as HTMLInputElement;
+  volumeSlider.addEventListener("input", () => {
+    const val = Number(volumeSlider.value) || 1.0;
+    settings.voiceVolume = val;
+    volumeLabel.textContent = `${Math.round(val * 100)}%`;
+    void save();
+  });
+
   const sttSelect = h("select", {}) as HTMLSelectElement;
   sttSelect.append(
     h("option", { value: "native", text: "Windows Native (Free, offline)" }),
@@ -601,7 +803,14 @@ function voiceSection(): HTMLElement {
       const sampleText = settings.voiceLanguage.startsWith("id")
         ? "Halo! Mochi siap membantu kamu."
         : "Hello! Mochi is ready to assist you.";
-      const bytes = await Bridge.ttsSpeak(sampleText, settings.voiceTtsVoice, settings.voiceLanguage);
+      const bytes = await Bridge.ttsSpeak(
+        sampleText,
+        settings.voiceTtsVoice,
+        settings.voiceLanguage,
+        formatEdgeRate(settings.voiceSpeed),
+        formatEdgeVolume(settings.voiceVolume),
+        settings.voicePitch || "+0Hz",
+      );
       const uint8 = new Uint8Array(bytes);
       const isWav =
         uint8.length >= 4 &&
@@ -648,6 +857,35 @@ function voiceSection(): HTMLElement {
       h("label", { text: "TTS Voice" }),
       voiceSelect,
       testBtn,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Response Mode" }),
+      responseModeSelect,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Microphone input" }),
+      deviceSelect,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Microphone boost" }),
+      boostSlider,
+      boostLabel,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Test microphone" }),
+      testMicBtn,
+      micMeter,
+      micStatusLabel,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Voice Speed" }),
+      speedSlider,
+      speedLabel,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Voice Volume" }),
+      volumeSlider,
+      volumeLabel,
     ),
     h("div", { class: "row" },
       h("label", { text: "STT Engine" }),
@@ -705,6 +943,11 @@ function generalSection(): HTMLElement {
       h("label", { text: "Always compact" }),
       toggle(settings.alwaysShowCompact, (v) => { settings.alwaysShowCompact = v; void save(); }),
       h("span", { class: "hint", text: "Always visible in compact mode when idle" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Web access" }),
+      toggle(settings.webAccessEnabled, (v) => { settings.webAccessEnabled = v; void save(); }),
+      h("span", { class: "hint", text: "Allow Coucou to search the web and read pages" }),
     ),
     h("div", { class: "row" },
       h("label", { text: "Sound" }),

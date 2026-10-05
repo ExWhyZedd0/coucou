@@ -113,8 +113,15 @@ export interface Settings {
   voiceSttProvider: "native" | "whisper";
   voiceWhisperUrl: string;
   voiceSilenceTimeout: number;
+  voiceSpeed: number;
+  voiceVolume: number;
+  voicePitch: string;
+  voiceResponseMode: "concise" | "full";
+  voiceInputDevice: string;
+  voiceMicGain: number;
   /** Claude model used by the chat. */
   model: string;
+  webAccessEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -140,7 +147,14 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceSttProvider: "native",
   voiceWhisperUrl: "http://localhost:11434",
   voiceSilenceTimeout: 1.5,
+  voiceSpeed: 1.0,
+  voiceVolume: 1.0,
+  voicePitch: "+0Hz",
+  voiceResponseMode: "concise",
+  voiceInputDevice: "",
+  voiceMicGain: 2.0,
   model: "claude-opus-5",
+  webAccessEnabled: true,
 };
 
 type Listener = () => void;
@@ -165,6 +179,8 @@ class AppState {
   isVoiceListening = false;
   isVoiceTranscribing: boolean = false;
   isVoiceSpeaking = false;
+  voiceListeningPrompt: string | null = null;
+  isWebSearching: boolean = false;
 
   uploadProgress = 0;
   uploadDuration = 2.4;

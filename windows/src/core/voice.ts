@@ -44,6 +44,50 @@ function uint8ToBase64(uint8: Uint8Array): string {
   return btoa(binary);
 }
 
+export function formatEdgeRate(speed = 1.0): string {
+  const pct = Math.round((speed - 1.0) * 100);
+  return pct >= 0 ? `+${pct}%` : `${pct}%`;
+}
+
+export function formatEdgeVolume(volume = 1.0): string {
+  const pct = Math.round((volume - 1.0) * 100);
+  return pct >= 0 ? `+${pct}%` : `${pct}%`;
+}
+
+export function cleanTextForSpeech(raw: string): string {
+  return raw
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/^[#*>\-+]+\s*/gm, "")
+    .replace(/[*_#~|]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function extractConciseSpeech(text: string, mode: "concise" | "full" = "concise"): string {
+  const cleaned = cleanTextForSpeech(text);
+  if (!cleaned || mode === "full") return cleaned;
+
+  const sentences = cleaned.match(/[^.!?]+[.!?]+(\s|$)/g);
+  if (sentences && sentences.length > 0) {
+    let result = sentences[0].trim();
+    if (sentences.length > 1 && result.length < 120) {
+      result += " " + sentences[1].trim();
+    }
+    if (result.length > 280) {
+      result = result.slice(0, 277).replace(/\s+\S*$/, "") + "...";
+    }
+    return result;
+  }
+
+  if (cleaned.length > 200) {
+    return cleaned.slice(0, 197).replace(/\s+\S*$/, "") + "...";
+  }
+  return cleaned;
+}
+
 export class VoiceEngine {
   private pcmChunks: Float32Array[] = [];
   private audioContext: AudioContext | null = null;
@@ -54,6 +98,12 @@ export class VoiceEngine {
   private silenceTimer: number | null = null;
   private speakingAudio: HTMLAudioElement | null = null;
   private onTranscriptionCallback: ((text: string) => void) | null = null;
+  private gainNode: GainNode | null = null;
+  private speechRecognition: any = null;
+  private onLiveTranscriptCallback: ((text: string, isFinal: boolean) => void) | null = null;
+  private onAutoSendCallback: ((text: string) => void) | null = null;
+  private autoSendTimer: number | null = null;
+  private hasLiveTranscript: boolean = false;
 
   initWakeWord(onWake: () => void) {
     void Bridge.listenWakeWord(() => {
@@ -69,6 +119,21 @@ export class VoiceEngine {
     this.onTranscriptionCallback = fn;
   }
 
+  setLiveTranscriptHandler(fn: (text: string, isFinal: boolean) => void) {
+    this.onLiveTranscriptCallback = fn;
+  }
+
+  setAutoSendHandler(fn: (text: string) => void) {
+    this.onAutoSendCallback = fn;
+  }
+
+  cancelAutoSend(): void {
+    if (this.autoSendTimer != null) {
+      window.clearTimeout(this.autoSendTimer);
+      this.autoSendTimer = null;
+    }
+  }
+
   async toggleListening() {
     if (State.isVoiceListening) {
       await this.stopListeningAndTranscribe();
@@ -79,18 +144,34 @@ export class VoiceEngine {
 
   async startListening() {
     if (State.isVoiceListening) return;
+    State.voiceListeningPrompt = null;
     this.stopSpeaking();
 
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: false,
+        autoGainControl: true,
+      };
+      if (State.settings.voiceInputDevice && State.settings.voiceInputDevice !== "default") {
+        audioConstraints.deviceId = { exact: State.settings.voiceInputDevice };
+      }
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      void Bridge.log("voice recording using input device: " + (State.settings.voiceInputDevice || "default"));
       this.pcmChunks = [];
+      this.hasLiveTranscript = false;
 
       this.audioContext = new AudioContext({ sampleRate: 16000 });
       const source = this.audioContext.createMediaStreamSource(this.stream);
 
+      const gainNode = this.audioContext.createGain();
+      gainNode.gain.value = State.settings.voiceMicGain || 2.0;
+      this.gainNode = gainNode;
+      source.connect(gainNode);
+
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 512;
-      source.connect(this.analyser);
+      gainNode.connect(this.analyser);
 
       this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
       this.processor.onaudioprocess = (e) => {
@@ -98,8 +179,68 @@ export class VoiceEngine {
         const input = e.inputBuffer.getChannelData(0);
         this.pcmChunks.push(new Float32Array(input));
       };
-      source.connect(this.processor);
+      gainNode.connect(this.processor);
       this.processor.connect(this.audioContext.destination);
+
+      const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRec) {
+        try {
+          const recognition = new SpeechRec();
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.lang = State.settings.voiceLanguage || "id-ID";
+          this.hasLiveTranscript = false;
+
+          recognition.onresult = (event: any) => {
+            let interimTranscript = "";
+            let finalTranscript = "";
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+              const transcript = event.results[i][0].transcript;
+              if (event.results[i].isFinal) {
+                finalTranscript += transcript;
+              } else {
+                interimTranscript += transcript;
+              }
+            }
+            const fullText = (finalTranscript + interimTranscript).trim();
+            const isFinal = Boolean(finalTranscript && !interimTranscript);
+
+            if (fullText) {
+              this.hasLiveTranscript = true;
+              if (this.onLiveTranscriptCallback) {
+                this.onLiveTranscriptCallback(fullText, isFinal);
+              }
+
+              if (this.autoSendTimer != null) {
+                window.clearTimeout(this.autoSendTimer);
+                this.autoSendTimer = null;
+              }
+              if (this.onAutoSendCallback && fullText.length > 0) {
+                this.autoSendTimer = window.setTimeout(() => {
+                  if (this.onAutoSendCallback) {
+                    this.onAutoSendCallback(fullText);
+                  }
+                  void this.stopListeningAndTranscribe();
+                }, 1500);
+              }
+            }
+          };
+
+          recognition.onerror = (e: any) => {
+            const err = e?.error || String(e);
+            void Bridge.log("speech recognition error: " + err);
+            if (e?.error === "network") {
+              State.voiceListeningPrompt = "Listening (Whisper)... Speak and pause to send";
+              State.notify();
+            }
+          };
+
+          recognition.start();
+          this.speechRecognition = recognition;
+        } catch (e) {
+          void Bridge.log("failed to start speech recognition: " + String(e));
+        }
+      }
 
       State.isVoiceListening = true;
       State.notify();
@@ -128,12 +269,16 @@ export class VoiceEngine {
       for (let i = 0; i < buffer.length; i++) sum += buffer[i];
       const avg = sum / buffer.length;
 
-      if (avg > 15) {
+      if (avg > 6) {
         speechFrameCount++;
         if (speechFrameCount >= 3) hasSpoken = true;
         if (this.silenceTimer != null) {
           window.clearTimeout(this.silenceTimer);
           this.silenceTimer = null;
+        }
+        if (this.autoSendTimer != null) {
+          window.clearTimeout(this.autoSendTimer);
+          this.autoSendTimer = null;
         }
       } else {
         speechFrameCount = Math.max(0, speechFrameCount - 1);
@@ -150,6 +295,19 @@ export class VoiceEngine {
   async stopListeningAndTranscribe() {
     if (!State.isVoiceListening) return;
 
+    if (this.speechRecognition) {
+      try { this.speechRecognition.stop(); } catch {}
+      this.speechRecognition = null;
+    }
+    if (this.autoSendTimer != null) {
+      window.clearTimeout(this.autoSendTimer);
+      this.autoSendTimer = null;
+    }
+    if (this.gainNode) {
+      this.gainNode.disconnect();
+      this.gainNode = null;
+    }
+
     if (this.vadInterval != null) {
       clearInterval(this.vadInterval);
       this.vadInterval = null;
@@ -160,6 +318,7 @@ export class VoiceEngine {
     }
 
     State.isVoiceListening = false;
+    State.voiceListeningPrompt = null;
     State.notify();
     void Bridge.log("voice listening stopped, transcribing...");
 
@@ -176,6 +335,12 @@ export class VoiceEngine {
     if (this.audioContext) {
       void this.audioContext.close();
       this.audioContext = null;
+    }
+
+    if (this.hasLiveTranscript) {
+      void Bridge.log("voice live transcript was captured, skipping whisper STT");
+      this.pcmChunks = [];
+      return;
     }
 
     const totalSamples = this.pcmChunks.reduce((acc, c) => acc + c.length, 0);
@@ -201,6 +366,17 @@ export class VoiceEngine {
     void Bridge.log(
       `voice audio metrics: totalSamples=${totalSamples}, maxAmplitude=${maxAmplitude.toFixed(3)}`
     );
+
+    if (maxAmplitude > 0) {
+      const targetPeak = 0.85;
+      const gain = Math.min(25.0, targetPeak / maxAmplitude);
+      for (let i = 0; i < merged.length; i++) {
+        merged[i] = Math.max(-1.0, Math.min(1.0, merged[i] * gain));
+      }
+      void Bridge.log(
+        `voice applied peak normalization gain: ${gain.toFixed(2)}, adjusted peak to ${(maxAmplitude * gain).toFixed(3)}`
+      );
+    }
 
     const wavBytes = encodeWav(merged, sampleRate);
     const base64 = uint8ToBase64(wavBytes);
@@ -241,22 +417,25 @@ export class VoiceEngine {
     if (!State.settings.voiceEnabled || !text.trim()) return;
     this.stopSpeaking();
 
-    const cleaned = text
-      .replace(/https?:\/\/\S+/g, "")
-      .replace(/[*_#`]/g, "")
-      .trim();
-
-    if (!cleaned) return;
+    const speechText = extractConciseSpeech(text, State.settings.voiceResponseMode);
+    if (!speechText) return;
 
     try {
       State.isVoiceSpeaking = true;
       State.notify();
-      void Bridge.log(`voice speaking reply: '${cleaned.slice(0, 40)}...'`);
+      void Bridge.log(`voice speaking reply: '${speechText.slice(0, 40)}...'`);
+
+      const rateStr = formatEdgeRate(State.settings.voiceSpeed);
+      const volumeStr = formatEdgeVolume(State.settings.voiceVolume);
+      const pitchStr = State.settings.voicePitch || "+0Hz";
 
       const bytes = await Bridge.ttsSpeak(
-        cleaned,
+        speechText,
         State.settings.voiceTtsVoice,
         State.settings.voiceLanguage,
+        rateStr,
+        volumeStr,
+        pitchStr,
       );
 
       if (!State.isVoiceSpeaking) return;

@@ -73,8 +73,28 @@ pub fn transcribe_local_whisper(audio_bytes: &[u8], lang: &str) -> Result<String
     };
 
     let script = format!(
-        "import whisper; model = whisper.load_model('tiny'); res = model.transcribe(r'{}', language='{}', fp16=False, verbose=False); print(res['text'].strip())",
-        wav_path_str, short_lang
+        r#"
+import sys, warnings
+warnings.filterwarnings('ignore')
+import whisper
+try:
+    model = whisper.load_model('base')
+except Exception:
+    model = whisper.load_model('tiny')
+res = model.transcribe(
+    r'{wav_path}',
+    language='{short_lang}',
+    fp16=False,
+    verbose=False,
+    condition_on_previous_text=False,
+    temperature=0.0,
+    initial_prompt='Halo, percakapan dalam bahasa Indonesia atau Inggris.'
+)
+text = res.get('text', '').strip()
+print('RESULT:' + text)
+"#,
+        wav_path = wav_path_str,
+        short_lang = short_lang
     );
 
     #[cfg(windows)]
@@ -104,11 +124,11 @@ pub fn transcribe_local_whisper(audio_bytes: &[u8], lang: &str) -> Result<String
     let stdout = String::from_utf8_lossy(&out.stdout);
     let text = stdout
         .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.contains("UserWarning") && !l.contains("Warning:"))
-        .last()
-        .unwrap_or("")
-        .to_string();
+        .find_map(|l| {
+            let trimmed = l.trim();
+            trimmed.strip_prefix("RESULT:").map(|rest| rest.trim().to_string())
+        })
+        .unwrap_or_default();
 
     crate::log::line(format!("stt local whisper transcribed: '{text}'"));
     Ok(text)

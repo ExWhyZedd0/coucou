@@ -417,8 +417,10 @@ function buildSettings(actions: ViewActions): ViewHost {
   const segButtons = [10, 15, 30].map((s) =>
     h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`),
   );
-  const claudeBadge = h("span", { class: "status-badge" });
-  const apiBadge = h("span", { class: "status-badge" });
+  const integrationBadges = h("div", {
+    class: "settings-badges",
+    style: "display:flex;gap:12px;align-items:center",
+  });
 
   const rows = h(
     "div",
@@ -434,8 +436,7 @@ function buildSettings(actions: ViewActions): ViewHost {
     h(
       "div",
       { class: "settings-row", style: "gap:14px" },
-      claudeBadge,
-      apiBadge,
+      integrationBadges,
       h("div", { class: "grow" }),
       h("button", {
         class: "link-btn",
@@ -458,13 +459,21 @@ function buildSettings(actions: ViewActions): ViewHost {
       volume.style.opacity = s.soundEnabled ? "1" : "0.4";
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
       segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
-      clear(claudeBadge);
-      claudeBadge.append(
-        dot(s.hooksInstalled ? "#22C55E" : "#F4505E", 6),
-        h("span", { text: "Claude Code" }),
+      clear(integrationBadges);
+      integrationBadges.append(
+        h("span", { class: "status-badge" }, dot("#22C55E", 6), h("span", { text: "Antigravity" })),
       );
-      clear(apiBadge);
-      apiBadge.append(dot("#F4505E", 6), h("span", { text: "API" }));
+      if (s.localModel && s.localModel.trim()) {
+        const localName = s.localProvider ? s.localProvider.toUpperCase() : "Local LLM";
+        integrationBadges.append(
+          h("span", { class: "status-badge" }, dot("#22C55E", 6), h("span", { text: localName })),
+        );
+      }
+      if (s.hooksInstalled) {
+        integrationBadges.append(
+          h("span", { class: "status-badge" }, dot("#22C55E", 6), h("span", { text: "Claude Code" })),
+        );
+      }
     },
   };
 }

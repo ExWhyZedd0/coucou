@@ -31,7 +31,12 @@ Add-Type -AssemblyName System.Speech;
 try {{
     $recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine;
     $choices = New-Object System.Speech.Recognition.Choices;
-    $words = @('hey coucou', 'coucou', 'mochi', 'cuckoo', 'hey cuckoo', 'coco', 'hey coco', 'hey mochi');
+    $words = @(
+        'hey coucou', 'coucou', 'cuckoo', 'hey cuckoo',
+        'kuku', 'hey kuku', 'kukuk', 'hey kukuk',
+        'koko', 'hey koko', 'coco', 'hey coco',
+        'moci', 'hey moci', 'mochi', 'hey mochi'
+    );
     if ('{0}' -ne '') {{ $words += '{0}' }};
     $choices.Add([string[]]$words);
     $gb = New-Object System.Speech.Recognition.GrammarBuilder;
@@ -39,10 +44,30 @@ try {{
     $grammar = New-Object System.Speech.Recognition.Grammar($gb);
     $recognizer.LoadGrammar($grammar);
     $recognizer.SetInputToDefaultAudioDevice();
+    [Console]::WriteLine('DEVICE_INFO: Audio input listener bound to default audio device');
+    [Console]::Out.Flush();
+    $script:lastTrigger = [DateTime]::MinValue;
+    $script:debounceMs = 1500;
+    $triggerWake = {{
+        param($conf, $text, $type)
+        $now = [DateTime]::UtcNow;
+        if (($now - $script:lastTrigger).TotalMilliseconds -gt $script:debounceMs) {{
+            $script:lastTrigger = $now;
+            [Console]::WriteLine(('WAKE_DETECTED:' + $type + ':' + $conf + ':' + $text));
+            [Console]::Out.Flush();
+        }}
+    }};
+    $recognizer.add_SpeechHypothesized({{
+        param($s, $e)
+        if ($e.Result.Confidence -ge 0.20) {{
+            & $triggerWake $e.Result.Confidence $e.Result.Text "hypothesized"
+        }}
+    }});
     $recognizer.add_SpeechRecognized({{
         param($s, $e)
-        [Console]::WriteLine('WAKE_DETECTED');
-        [Console]::Out.Flush();
+        if ($e.Result.Confidence -ge 0.15) {{
+            & $triggerWake $e.Result.Confidence $e.Result.Text "recognized"
+        }}
     }});
     $recognizer.RecognizeAsync([System.Speech.Recognition.RecognizeMode]::Multiple);
     while ($true) {{ Start-Sleep -Seconds 1 }};
@@ -66,9 +91,11 @@ try {{
                     let reader = BufReader::new(stdout);
                     for line in reader.lines().map_while(Result::ok) {
                         let trimmed = line.trim();
-                        if trimmed == "WAKE_DETECTED" {
-                            crate::log::line("voice wake word detected");
+                        if trimmed.starts_with("WAKE_DETECTED") {
+                            crate::log::line(format!("voice wake word detected: {trimmed}"));
                             let _ = handle.emit("wake-word-detected", ());
+                        } else if trimmed.starts_with("DEVICE_INFO:") {
+                            crate::log::line(format!("voice wake {trimmed}"));
                         } else if trimmed.starts_with("ERROR:") {
                             crate::log::line(format!("voice wake error: {trimmed}"));
                         }

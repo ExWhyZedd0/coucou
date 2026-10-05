@@ -15,6 +15,7 @@ mod local_chat;
 mod voice_wake;
 mod tts;
 mod stt;
+mod web_access;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -249,6 +250,16 @@ async fn local_chat_send(
     local_chat::chat_send(&base_url, &model, messages).await
 }
 
+#[tauri::command]
+async fn web_search(query: String) -> Result<Vec<web_access::SearchResult>, String> {
+    web_access::search(&query).await
+}
+
+#[tauri::command]
+async fn web_fetch(url: String) -> Result<String, String> {
+    web_access::fetch(&url).await
+}
+
 /// Copies a dropped file into the inbox and reports its name back.
 #[tauri::command]
 fn ingest_file(path: String) -> Result<DroppedFile, String> {
@@ -410,6 +421,8 @@ pub fn run() {
             stt::stt_transcribe,
             voice_wake::start_wake_word_listener,
             voice_wake::stop_wake_word_listener,
+            web_search,
+            web_fetch,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

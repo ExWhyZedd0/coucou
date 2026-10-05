@@ -40,10 +40,24 @@ pub struct Settings {
     pub voice_whisper_url: String,
     #[serde(default = "default_silence_timeout")]
     pub voice_silence_timeout: f64,
+    #[serde(default = "default_voice_speed")]
+    pub voice_speed: f64,
+    #[serde(default = "default_voice_volume")]
+    pub voice_volume: f64,
+    #[serde(default = "default_voice_pitch")]
+    pub voice_pitch: String,
+    #[serde(default = "default_voice_response_mode")]
+    pub voice_response_mode: String,
+    #[serde(default)]
+    pub voice_input_device: String,
+    #[serde(default = "default_voice_mic_gain")]
+    pub voice_mic_gain: f64,
     /// Claude model used by the chat. Changeable in the settings window.
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default = "default_true")]
+    pub web_access_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -86,6 +100,26 @@ fn default_silence_timeout() -> f64 {
     1.5
 }
 
+fn default_voice_speed() -> f64 {
+    1.0
+}
+
+fn default_voice_volume() -> f64 {
+    1.0
+}
+
+fn default_voice_pitch() -> String {
+    "+0Hz".to_string()
+}
+
+fn default_voice_response_mode() -> String {
+    "concise".to_string()
+}
+
+fn default_voice_mic_gain() -> f64 {
+    2.0
+}
+
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
 }
@@ -118,7 +152,14 @@ impl Default for Settings {
             voice_stt_provider: default_stt_provider(),
             voice_whisper_url: default_whisper_url(),
             voice_silence_timeout: default_silence_timeout(),
+            voice_speed: default_voice_speed(),
+            voice_volume: default_voice_volume(),
+            voice_pitch: default_voice_pitch(),
+            voice_response_mode: default_voice_response_mode(),
+            voice_input_device: String::new(),
+            voice_mic_gain: default_voice_mic_gain(),
             model: default_model(),
+            web_access_enabled: true,
         }
     }
 }

@@ -59,7 +59,13 @@ fn resolve_edge_tts_cmd() -> Option<(PathBuf, Vec<String>)> {
 }
 
 #[cfg(windows)]
-fn speak_windows_sapi(text: &str, voice_name: &str, lang: &str) -> Result<Vec<u8>, String> {
+fn speak_windows_sapi(
+    text: &str,
+    voice_name: &str,
+    lang: &str,
+    _rate: &str,
+    _volume: &str,
+) -> Result<Vec<u8>, String> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let script = format!(
@@ -111,11 +117,24 @@ $synth.Speak('{2}');
 }
 
 #[cfg(not(windows))]
-fn speak_windows_sapi(_text: &str, _voice: &str, _lang: &str) -> Result<Vec<u8>, String> {
+fn speak_windows_sapi(
+    _text: &str,
+    _voice: &str,
+    _lang: &str,
+    _rate: &str,
+    _volume: &str,
+) -> Result<Vec<u8>, String> {
     Err("Windows SAPI not available on this platform".into())
 }
 
-pub async fn speak(text: &str, voice: &str, lang: &str) -> Result<Vec<u8>, String> {
+pub async fn speak(
+    text: &str,
+    voice: &str,
+    lang: &str,
+    rate: &str,
+    volume: &str,
+    pitch: &str,
+) -> Result<Vec<u8>, String> {
     STOP_REQUESTED.store(false, Ordering::Relaxed);
 
     // 1. Try python edge-tts CLI if installed on the system
@@ -129,37 +148,64 @@ pub async fn speak(text: &str, voice: &str, lang: &str) -> Result<Vec<u8>, Strin
             .as_nanos();
         let temp_file = temp_dir.join(format!("coucou_tts_{}_{}.mp3", std::process::id(), nanos));
         let temp_str = temp_file.to_string_lossy().to_string();
+        let temp_txt_file = temp_dir.join(format!("coucou_tts_{}_{}.txt", std::process::id(), nanos));
+        let temp_txt_str = temp_txt_file.to_string_lossy().to_string();
+
+        let _ = std::fs::write(&temp_txt_file, text);
 
         if let Some((cmd_path, extra_args)) = resolve_edge_tts_cmd() {
             let mut cmd = Command::new(cmd_path);
             for arg in &extra_args {
                 cmd.arg(arg);
             }
-            cmd.args(["--voice", voice, "--text", text, "--write-media", &temp_str])
-                .creation_flags(CREATE_NO_WINDOW);
+            cmd.args([
+                format!("--voice={voice}"),
+                format!("--rate={rate}"),
+                format!("--volume={volume}"),
+                format!("--pitch={pitch}"),
+                "--file".to_string(),
+                temp_txt_str.clone(),
+                format!("--write-media={temp_str}"),
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
 
             if let Ok(out) = cmd.output() {
                 if out.status.success() && temp_file.exists() {
                     if let Ok(bytes) = std::fs::read(&temp_file) {
                         let _ = std::fs::remove_file(&temp_file);
+                        let _ = std::fs::remove_file(&temp_txt_file);
                         crate::log::line("tts generated via edge-tts");
                         return Ok(bytes);
                     }
+                } else {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    crate::log::line(format!("tts edge-tts error: {}", stderr.trim()));
                 }
             }
-            let _ = std::fs::remove_file(&temp_file);
         }
+        let _ = std::fs::remove_file(&temp_file);
+        let _ = std::fs::remove_file(&temp_txt_file);
 
         crate::log::line("tts edge-tts failed, falling back to SAPI");
     }
 
     // 2. Fallback to Windows SAPI / Speech Synthesis
-    speak_windows_sapi(text, voice, lang)
+    speak_windows_sapi(text, voice, lang, rate, volume)
 }
 
 #[tauri::command]
-pub async fn tts_speak(text: String, voice: String, lang: String) -> Result<Vec<u8>, String> {
-    speak(&text, &voice, &lang).await
+pub async fn tts_speak(
+    text: String,
+    voice: String,
+    lang: String,
+    rate: Option<String>,
+    volume: Option<String>,
+    pitch: Option<String>,
+) -> Result<Vec<u8>, String> {
+    let r = rate.unwrap_or_else(|| "+0%".to_string());
+    let v = volume.unwrap_or_else(|| "+0%".to_string());
+    let p = pitch.unwrap_or_else(|| "+0Hz".to_string());
+    speak(&text, &voice, &lang, &r, &v, &p).await
 }
 
 #[tauri::command]
