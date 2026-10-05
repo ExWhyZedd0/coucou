@@ -177,6 +177,8 @@ function handleHook(island: Island, payload: HookPayload) {
   const ensurePill = () => {
     if (isExternalAgent) {
       State.upsertExternalAgent(agentId, validAgent!, agentColor(validAgent!));
+      const t = State.tasks.find((x) => x.id === agentId);
+      if (t && cwd) t.sessionCwd = cwd;
     } else {
       upsert(projectName, cwd);
     }
@@ -237,7 +239,10 @@ function handleHook(island: Island, payload: HookPayload) {
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
-        if (isExternalAgent) {
+        if (agentId === State.mainPillId || agentId === "agent_antigravity") {
+          State.updateTask(agentId, "idle");
+          State.setPillBadge(agentId, null);
+        } else if (isExternalAgent) {
           State.removeTask(agentId);
         } else {
           State.updateTask(agentId, "idle");
@@ -254,7 +259,10 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "SessionEnd":
-      if (isExternalAgent) {
+      if (agentId === State.mainPillId || agentId === "agent_antigravity") {
+        State.updateTask(agentId, "idle");
+        State.setPillBadge(agentId, null);
+      } else if (isExternalAgent) {
         State.removeTask(agentId);
       } else {
         State.updateTask(agentId, "idle");

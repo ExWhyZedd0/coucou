@@ -85,6 +85,10 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
+  localChatModels: (baseUrl: string) =>
+    callOrThrow<string[]>("local_chat_models", { baseUrl }),
+  localChatSend: (baseUrl: string, model: string, messages: { role: string; content: string }[]) =>
+    callOrThrow<{ text: string }>("local_chat_send", { baseUrl, model, messages }),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
@@ -99,6 +103,23 @@ export const Bridge = {
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
+
+  // ── Voice ─────────────────────────────────────────────────────────────────
+  ttsSpeak: (text: string, voice: string, lang: string) =>
+    callOrThrow<number[]>("tts_speak", { text, voice, lang }),
+
+  ttsStop: () => call<void>("tts_stop"),
+
+  sttTranscribe: (audioBase64: string, lang: string, provider: string, whisperUrl: string) =>
+    callOrThrow<string>("stt_transcribe", { audioBase64, lang, provider, whisperUrl }),
+
+  startWakeWordListener: (wakeWord: string) =>
+    call<void>("start_wake_word_listener", { wakeWord }),
+
+  stopWakeWordListener: () => call<void>("stop_wake_word_listener"),
+
+  listenWakeWord: (callback: () => void) =>
+    onEvent<null>("wake-word-detected", () => callback()),
 };
 
 export interface IntegrationUpdate {

@@ -6,6 +6,7 @@ import { ICONS } from "./icons";
 import { Bridge, type ChatContext } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
+import { Voice } from "../core/voice";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
@@ -45,8 +46,16 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     placeholder: "Ask me anything…",
     spellcheck: "false",
   }) as HTMLInputElement;
+  const mic = h("button", { class: "mic-btn", title: "Toggle voice input" }, svg(ICONS.mic, 14));
+  mic.addEventListener("click", () => void Voice.toggleListening());
+
+  Voice.setTranscriptionHandler((text) => {
+    input.value = text;
+    void submit();
+  });
+
   const send = h("button", { class: "send-btn", title: "Send" }, svg(ICONS.arrowUp, 11));
-  const bar = h("div", { class: "chat-bar" }, input, send);
+  const bar = h("div", { class: "chat-bar" }, input, mic, send);
 
   const el = h(
     "div",
@@ -59,6 +68,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   let renderedCount = -1;
 
   async function submit() {
+    Voice.stopSpeaking();
     const query = input.value.trim();
     if (!query || sending) return;
     input.value = "";
@@ -75,10 +85,23 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
-      const reply = await Bridge.chatSend(query, context);
+      let reply: { text: string };
+      if (State.settings.chatProvider === "local") {
+        const messages = State.chatHistory.map((m) => ({ role: m.role, content: m.content }));
+        reply = await Bridge.localChatSend(
+          State.settings.localServerUrl,
+          State.settings.localModel,
+          messages,
+        );
+      } else {
+        reply = await Bridge.chatSend(query, context);
+      }
       State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
       State.stateOverride = null;
       Sound.play("finish");
+      if (State.settings.voiceEnabled) {
+        void Voice.speakReply(reply.text);
+      }
     } catch (err) {
       State.stateOverride = null;
       State.noteMessage = String(err).replace(/^Error:\s*/, "");
@@ -93,7 +116,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   }
 
   send.addEventListener("click", () => void submit());
+  input.addEventListener("input", () => {
+    Voice.stopSpeaking();
+  });
   input.addEventListener("keydown", (e) => {
+    Voice.stopSpeaking();
     if ((e as KeyboardEvent).key === "Enter") {
       e.preventDefault();
       void submit();
@@ -122,8 +149,15 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         log.scrollTop = log.scrollHeight;
       }
 
-      input.placeholder = State.chatHistory.length === 0 ? "Ask me anything…" : "Continue…";
+      input.placeholder = State.isVoiceListening
+        ? "Listening…"
+        : (State.isVoiceTranscribing || (State.stateOverride === "thinking" && !sending))
+          ? "Transcribing voice…"
+          : State.chatHistory.length === 0
+            ? "Ask me anything…"
+            : "Continue…";
       input.disabled = sending;
+      mic.classList.toggle("listening", State.isVoiceListening);
     },
     focus() {
       input.focus();

@@ -358,6 +358,311 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
   return h("section", {}, h("h2", {}, h("span", { text: "Integrations" })), note, list);
 }
 
+// ── Local LLM section ─────────────────────────────────────────────────────────
+
+const LOCAL_PROVIDERS: { id: "ollama" | "lmstudio" | "unsloth" | "custom"; name: string; url: string }[] = [
+  { id: "ollama", name: "Ollama", url: "http://localhost:11434" },
+  { id: "lmstudio", name: "LM Studio", url: "http://localhost:1234" },
+  { id: "unsloth", name: "Unsloth", url: "http://localhost:8000" },
+  { id: "custom", name: "Custom (OpenAI-compatible)", url: "" },
+];
+
+function localLlmSection(): HTMLElement {
+  const dot = statusDot(false);
+
+  const providerSelect = h("select", {}) as HTMLSelectElement;
+  for (const p of LOCAL_PROVIDERS) {
+    providerSelect.append(h("option", { value: p.id, text: p.name }));
+  }
+  providerSelect.value = settings.localProvider;
+
+  const urlInput = h("input", {
+    type: "text",
+    placeholder: "http://localhost:11434",
+    style: "flex:1 1 auto;min-width:0",
+    value: settings.localServerUrl || "http://localhost:11434",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+
+  providerSelect.addEventListener("change", () => {
+    const chosen = providerSelect.value as "ollama" | "lmstudio" | "unsloth" | "custom";
+    settings.localProvider = chosen;
+    const match = LOCAL_PROVIDERS.find((p) => p.id === chosen);
+    if (match && match.url) {
+      urlInput.value = match.url;
+      settings.localServerUrl = match.url;
+    }
+    void save();
+  });
+
+  urlInput.addEventListener("input", () => {
+    settings.localServerUrl = urlInput.value.trim();
+    void save();
+  });
+
+  const modelSelect = h("select", { style: "flex:1 1 auto;min-width:0" }) as HTMLSelectElement;
+  if (settings.localModel) {
+    modelSelect.append(h("option", { value: settings.localModel, text: settings.localModel }));
+    modelSelect.value = settings.localModel;
+  }
+  modelSelect.addEventListener("change", () => {
+    settings.localModel = modelSelect.value;
+    void save();
+  });
+
+  const connectBtn = h("button", { class: "primary", text: "Fetch models" });
+  const feedback = h("div", {});
+
+  async function fetchModels() {
+    clear(feedback);
+    connectBtn.disabled = true;
+    const url = urlInput.value.trim() || settings.localServerUrl;
+    settings.localServerUrl = url;
+    void save();
+    try {
+      const list = await Bridge.localChatModels(url);
+      clear(modelSelect);
+      if (list.length === 0) {
+        dot.style.background = "#f5a524";
+        feedback.append(h("div", { class: "notice warn", text: "Connected, but no models found on server." }));
+      } else {
+        dot.style.background = "#22c55e";
+        for (const m of list) {
+          modelSelect.append(h("option", { value: m, text: m }));
+        }
+        if (list.includes(settings.localModel)) {
+          modelSelect.value = settings.localModel;
+        } else {
+          modelSelect.value = list[0];
+          settings.localModel = list[0];
+          void save();
+        }
+        feedback.append(h("div", { class: "notice ok", text: `Found ${list.length} model(s).` }));
+      }
+    } catch (err) {
+      dot.style.background = "#f4505e";
+      feedback.append(h("div", { class: "notice err", text: `Connection failed: ${String(err)}` }));
+    } finally {
+      connectBtn.disabled = false;
+    }
+  }
+
+  connectBtn.addEventListener("click", () => void fetchModels());
+
+  const chatProviderSelect = h("select", {}) as HTMLSelectElement;
+  chatProviderSelect.append(
+    h("option", { value: "local", text: "Local LLM" }),
+    h("option", { value: "claude", text: "Claude (Anthropic API)" }),
+  );
+  chatProviderSelect.value = settings.chatProvider;
+  chatProviderSelect.addEventListener("change", () => {
+    settings.chatProvider = chatProviderSelect.value as "local" | "claude";
+    void save();
+  });
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, dot, h("span", { text: "Local LLM" })),
+    h("div", { class: "hint", text: "Run models locally via Ollama, LM Studio, Unsloth, or any OpenAI-compatible server." }),
+    h("div", { class: "row" },
+      h("label", { text: "Chat Provider" }),
+      chatProviderSelect,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Preset" }),
+      providerSelect,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Server URL" }),
+      urlInput,
+      connectBtn,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Model" }),
+      modelSelect,
+    ),
+    feedback,
+  );
+}
+
+// ── Voice section ─────────────────────────────────────────────────────────────
+
+const TTS_VOICES = [
+  { id: "id-ID-GadisNeural", label: "Indonesian - Gadis (Google Assistant style)" },
+  { id: "id-ID-ArdiNeural", label: "Indonesian Male - Ardi" },
+  { id: "en-US-JennyNeural", label: "US English Female - Jenny" },
+  { id: "en-US-GuyNeural", label: "US English Male - Guy" },
+  { id: "", label: "System Default (Offline)" },
+];
+
+function voiceSection(): HTMLElement {
+  const dot = statusDot(settings.voiceEnabled);
+
+  const enableToggle = toggle(settings.voiceEnabled, (v) => {
+    settings.voiceEnabled = v;
+    dot.style.background = v ? "#22c55e" : "#f4505e";
+    void save();
+  });
+
+  const wakeWordInput = h("input", {
+    type: "text",
+    value: settings.voiceWakeWord || "Hey Coucou",
+    placeholder: "Hey Coucou",
+    style: "flex:1 1 auto;min-width:0",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  wakeWordInput.addEventListener("change", () => {
+    settings.voiceWakeWord = wakeWordInput.value.trim() || "Hey Coucou";
+    void save();
+  });
+
+  const langSelect = h("select", {}) as HTMLSelectElement;
+  langSelect.append(
+    h("option", { value: "id-ID", text: "Indonesian (id-ID)" }),
+    h("option", { value: "en-US", text: "English (en-US)" }),
+  );
+  langSelect.value = settings.voiceLanguage;
+  langSelect.addEventListener("change", () => {
+    settings.voiceLanguage = langSelect.value as "id-ID" | "en-US";
+    void save();
+  });
+
+  const voiceSelect = h("select", { style: "flex:1 1 auto;min-width:0" }) as HTMLSelectElement;
+  for (const v of TTS_VOICES) {
+    voiceSelect.append(h("option", { value: v.id, text: v.label }));
+  }
+  voiceSelect.value = settings.voiceTtsVoice;
+  voiceSelect.addEventListener("change", () => {
+    settings.voiceTtsVoice = voiceSelect.value;
+    void save();
+  });
+
+  const sttSelect = h("select", {}) as HTMLSelectElement;
+  sttSelect.append(
+    h("option", { value: "native", text: "Windows Native (Free, offline)" }),
+    h("option", { value: "whisper", text: "Whisper Server (OpenAI-compatible)" }),
+  );
+  sttSelect.value = settings.voiceSttProvider;
+
+  const whisperUrlInput = h("input", {
+    type: "text",
+    value: settings.voiceWhisperUrl || "http://localhost:11434",
+    placeholder: "http://localhost:11434",
+    style: "flex:1 1 auto;min-width:0",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  whisperUrlInput.addEventListener("change", () => {
+    settings.voiceWhisperUrl = whisperUrlInput.value.trim();
+    void save();
+  });
+
+  const whisperRow = h("div", { class: "row" },
+    h("label", { text: "Whisper URL" }),
+    whisperUrlInput,
+  );
+  whisperRow.style.display = settings.voiceSttProvider === "whisper" ? "" : "none";
+
+  sttSelect.addEventListener("change", () => {
+    settings.voiceSttProvider = sttSelect.value as "native" | "whisper";
+    whisperRow.style.display = settings.voiceSttProvider === "whisper" ? "" : "none";
+    void save();
+  });
+
+  const silenceInput = h("input", {
+    type: "number",
+    min: "0.5",
+    max: "5.0",
+    step: "0.1",
+    value: String(settings.voiceSilenceTimeout || 1.5),
+    style: "width:72px",
+  }) as HTMLInputElement;
+  silenceInput.addEventListener("change", () => {
+    settings.voiceSilenceTimeout = Math.max(0.5, Math.min(5.0, Number(silenceInput.value) || 1.5));
+    silenceInput.value = String(settings.voiceSilenceTimeout);
+    void save();
+  });
+
+  const testBtn = h("button", { class: "primary", text: "Test Voice" });
+  const feedback = h("div", {});
+
+  let testAudio: HTMLAudioElement | null = null;
+  testBtn.addEventListener("click", async () => {
+    clear(feedback);
+    if (testAudio) {
+      testAudio.pause();
+      testAudio = null;
+    }
+    testBtn.disabled = true;
+    try {
+      const sampleText = settings.voiceLanguage.startsWith("id")
+        ? "Halo! Mochi siap membantu kamu."
+        : "Hello! Mochi is ready to assist you.";
+      const bytes = await Bridge.ttsSpeak(sampleText, settings.voiceTtsVoice, settings.voiceLanguage);
+      const uint8 = new Uint8Array(bytes);
+      const isWav =
+        uint8.length >= 4 &&
+        uint8[0] === 0x52 &&
+        uint8[1] === 0x49 &&
+        uint8[2] === 0x46 &&
+        uint8[3] === 0x46;
+      const blob = new Blob([uint8], { type: isWav ? "audio/wav" : "audio/mpeg" });
+      const url = URL.createObjectURL(blob);
+      testAudio = new Audio(url);
+      testAudio.onended = () => { URL.revokeObjectURL(url); };
+      testAudio.onerror = (e) => {
+        URL.revokeObjectURL(url);
+        feedback.append(h("div", { class: "notice err", text: `Audio decode error: ${String(e)}` }));
+      };
+      await testAudio.play();
+      feedback.append(h("div", { class: "notice ok", text: "Voice audio played." }));
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: `Voice test failed: ${String(err)}` }));
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, dot, h("span", { text: "Voice & Speech" })),
+    h("div", { class: "hint", text: "Hands-free wake word detection, native or Whisper STT, and natural Edge TTS speech." }),
+    h("div", { class: "row" },
+      h("label", { text: "Voice mode" }),
+      enableToggle,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Wake word" }),
+      wakeWordInput,
+      h("span", { class: "hint", text: "e.g. 'Hey Coucou' or 'Mochi'" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Language" }),
+      langSelect,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "TTS Voice" }),
+      voiceSelect,
+      testBtn,
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "STT Engine" }),
+      sttSelect,
+    ),
+    whisperRow,
+    h("div", { class: "row" },
+      h("label", { text: "Silence timeout" }),
+      silenceInput,
+      h("span", { class: "hint", text: "seconds of silence before sending audio" }),
+    ),
+    feedback,
+  );
+}
+
 // ── General section ───────────────────────────────────────────────────────────
 
 function generalSection(): HTMLElement {
@@ -396,6 +701,11 @@ function generalSection(): HTMLElement {
     "section",
     {},
     h("h2", {}, h("span", { text: "General" })),
+    h("div", { class: "row" },
+      h("label", { text: "Always compact" }),
+      toggle(settings.alwaysShowCompact, (v) => { settings.alwaysShowCompact = v; void save(); }),
+      h("span", { class: "hint", text: "Always visible in compact mode when idle" }),
+    ),
     h("div", { class: "row" },
       h("label", { text: "Sound" }),
       toggle(settings.soundEnabled, (v) => { settings.soundEnabled = v; void save(); }),
@@ -442,6 +752,8 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
+    localLlmSection(),
+    voiceSection(),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),
