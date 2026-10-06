@@ -261,6 +261,27 @@ async fn web_fetch(url: String) -> Result<String, String> {
     web_access::fetch(&url).await
 }
 
+#[tauri::command]
+fn open_app(name: String) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "start", "\"\"", &name])
+            .output()
+            .map_err(|e| format!("Failed to start {}: {}", name, e))?;
+        
+        if output.status.success() {
+            Ok(format!("Opened {}", name))
+        } else {
+            Err(format!("Could not find or open application '{}'", name))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Opening apps is only supported on Windows currently.".into())
+    }
+}
+
 /// Copies a dropped file into the inbox and reports its name back.
 #[tauri::command]
 fn ingest_file(path: String) -> Result<DroppedFile, String> {
@@ -427,6 +448,7 @@ pub fn run() {
             whisper_server::wake_server_stop,
             web_search,
             web_fetch,
+            open_app,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

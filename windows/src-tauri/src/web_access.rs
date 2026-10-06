@@ -1,4 +1,3 @@
-use base64::Engine;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -24,50 +23,20 @@ fn decode_entities(input: &str) -> String {
         .replace("&#8217;", "'")
 }
 
-fn decode_bing_url(raw_url: &str) -> String {
-    if let Some(pos) = raw_url.find("u=a1") {
-        let b64_part = &raw_url[pos + 4..];
-        let end = b64_part.find('&').unwrap_or(b64_part.len());
-        let b64 = &b64_part[..end];
-
-        let attempts = [
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64),
-            base64::engine::general_purpose::URL_SAFE.decode(b64),
-            base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64),
-            base64::engine::general_purpose::STANDARD.decode(b64),
-        ];
-
-        for res in attempts {
-            if let Ok(bytes) = res {
-                if let Ok(decoded) = String::from_utf8(bytes) {
-                    if decoded.starts_with("http://") || decoded.starts_with("https://") {
-                        return decoded;
-                    }
-                }
-            }
-        }
-    }
-    raw_url.to_string()
-}
-
 pub async fn search(query: &str) -> Result<Vec<SearchResult>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-    let search_url = reqwest::Url::parse_with_params(
-        "https://www.bing.com/search",
-        &[("q", query)],
-    ).map_err(|e| format!("Failed to build search URL: {e}"))?;
-
     let response = client
-        .get(search_url)
+        .post("https://lite.duckduckgo.com/lite/")
         .header(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
-        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("q={}", urlencoding::encode(query)))
         .send()
         .await
         .map_err(|e| format!("Search request failed: {e}"))?;
@@ -81,49 +50,29 @@ pub async fn search(query: &str) -> Result<Vec<SearchResult>, String> {
         .await
         .map_err(|e| format!("Failed to read search response body: {e}"))?;
 
-    let algo_re = Regex::new(r#"(?s)<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>"#)
-        .map_err(|e| e.to_string())?;
-    let link_re = Regex::new(r#"(?s)<h2[^>]*>.*?<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-        .map_err(|e| e.to_string())?;
-    let p_re = Regex::new(r#"(?s)<p[^>]*>(.*?)</p>"#)
-        .map_err(|e| e.to_string())?;
-    let tag_re = Regex::new(r#"<[^>]+>"#)
-        .map_err(|e| e.to_string())?;
+    let tag_re = Regex::new(r#"<[^>]+>"#).map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
+    
+    let re = Regex::new(r#"(?is)<a[^>]*href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>(.*?)</a>.*?<td[^>]*class=['"]result-snippet['"][^>]*>(.*?)</td>"#).map_err(|e| e.to_string())?;
 
-    for cap in algo_re.captures_iter(&html) {
+    for cap in re.captures_iter(&html) {
         if results.len() >= 5 {
             break;
         }
 
-        let block = &cap[1];
+        let raw_url = &cap[1];
+        let raw_title = &cap[2];
+        let raw_snippet = &cap[3];
 
-        let (raw_url, title) = if let Some(link_cap) = link_re.captures(block) {
-            let u = link_cap[1].to_string();
-            let raw_title = &link_cap[2];
-            let clean_title = tag_re.replace_all(raw_title, "").trim().to_string();
-            (u, decode_entities(&clean_title))
-        } else {
-            continue;
-        };
+        let clean_title = tag_re.replace_all(raw_title, "").trim().to_string();
+        let clean_snippet = tag_re.replace_all(raw_snippet, "").trim().to_string();
 
-        let snippet = if let Some(p_cap) = p_re.captures(block) {
-            let clean_p = tag_re.replace_all(&p_cap[1], "").trim().to_string();
-            decode_entities(&clean_p)
-        } else {
-            String::new()
-        };
-
-        let final_url = decode_bing_url(&raw_url);
-
-        if !title.is_empty() && (!snippet.is_empty() || !final_url.is_empty()) {
-            results.push(SearchResult {
-                title,
-                url: final_url,
-                snippet,
-            });
-        }
+        results.push(SearchResult {
+            title: decode_entities(&clean_title),
+            url: decode_entities(raw_url),
+            snippet: decode_entities(&clean_snippet),
+        });
     }
 
     crate::log::line(format!("web search '{query}' returned {} results", results.len()));

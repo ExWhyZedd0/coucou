@@ -91,6 +91,7 @@ export const Bridge = {
     callOrThrow<{ text: string }>("local_chat_send", { baseUrl, model, messages }),
   webSearch: (query: string) => callOrThrow<SearchResult[]>("web_search", { query }),
   webFetch: (url: string) => callOrThrow<string>("web_fetch", { url }),
+  openApp: (name: string) => callOrThrow<string>("open_app", { name }),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */

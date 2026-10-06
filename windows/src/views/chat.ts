@@ -88,7 +88,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   let sending = false;
   let renderedCount = -1;
 
-  async function submit() {
+    async function submit() {
     Voice.stopSpeaking();
     const query = input.value.trim();
     if (!query || sending) return;
@@ -106,6 +106,40 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
+      // Local Intent Parsing
+      const openMatch = query.match(/^(?:buka|open|launch|start|tolong buka)\s+(.+)$/i);
+      if (openMatch) {
+        const appName = openMatch[1].replace(/[.!?]+$/, "").trim();
+        try {
+          await Bridge.openApp(appName);
+          const replyText = `I have successfully opened ${appName} for you.`;
+          State.chatHistory.push({ id: nextId++, role: "assistant", content: replyText });
+          State.stateOverride = null;
+          Sound.play("finish");
+          if (State.settings.voiceEnabled) {
+            void Voice.speakReply(replyText);
+          }
+          sending = false;
+          State.notify();
+          onHeightChange();
+          input.focus();
+          return;
+        } catch (err) {
+          const replyText = `I couldn't open ${appName}. Error: ${err}`;
+          State.chatHistory.push({ id: nextId++, role: "assistant", content: replyText });
+          State.stateOverride = null;
+          Sound.play("error");
+          if (State.settings.voiceEnabled) {
+            void Voice.speakReply(replyText);
+          }
+          sending = false;
+          State.notify();
+          onHeightChange();
+          input.focus();
+          return;
+        }
+      }
+
       let groundingContext = "";
 
       if (State.settings.webAccessEnabled) {
