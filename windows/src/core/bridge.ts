@@ -121,6 +121,11 @@ export const Bridge = {
   sttTranscribe: (audioBase64: string, lang: string, provider: string, whisperUrl: string) =>
     callOrThrow<string>("stt_transcribe", { audioBase64, lang, provider, whisperUrl }),
 
+  wakeTranscribe: (audioBase64: string, lang: string, prompt: string) =>
+    callOrThrow<string>("wake_transcribe", { audioBase64, lang, prompt }),
+  wakeServerWarmUp: () => call<void>("wake_server_warm_up"),
+  wakeServerStop: () => call<void>("wake_server_stop"),
+
   startWakeWordListener: (wakeWord: string) =>
     call<void>("start_wake_word_listener", { wakeWord }),
 

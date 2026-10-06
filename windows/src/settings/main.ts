@@ -587,8 +587,8 @@ function voiceSection(): HTMLElement {
   const boostSlider = h("input", {
     type: "range",
     min: "1.0",
-    max: "5.0",
-    step: "0.2",
+    max: "10.0",
+    step: "0.5",
     value: String(settings.voiceMicGain ?? 2.0),
   }) as HTMLInputElement;
   boostSlider.addEventListener("input", () => {
@@ -644,7 +644,7 @@ function voiceSection(): HTMLElement {
       const constraints: MediaTrackConstraints = {
         echoCancellation: true,
         noiseSuppression: false,
-        autoGainControl: true,
+        autoGainControl: false,
       };
       if (settings.voiceInputDevice && settings.voiceInputDevice !== "default") {
         constraints.deviceId = { exact: settings.voiceInputDevice };
@@ -660,22 +660,26 @@ function voiceSection(): HTMLElement {
       const gainNode = audioCtx.createGain();
       gainNode.gain.value = settings.voiceMicGain || 2.0;
       const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
+      analyser.fftSize = 1024;
       source.connect(gainNode);
       gainNode.connect(analyser);
 
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const dataArray = new Uint8Array(analyser.fftSize);
 
       const tick = () => {
         if (!testMicStream || !testAudioCtx) return;
-        analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
+        // The slider can move while the test runs: follow it live.
+        gainNode.gain.value = settings.voiceMicGain || 2.0;
+        analyser.getByteTimeDomainData(dataArray);
+        let sq = 0;
         for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
+          const v = (dataArray[i] - 128) / 128;
+          sq += v * v;
         }
-        const avg = sum / dataArray.length;
-        const pct = Math.min(100, Math.round((avg / 128) * 100));
+        const rms = Math.sqrt(sq / dataArray.length);
+        const pct = Math.min(100, Math.round(rms * 400));
         micMeterBar.style.width = `${pct}%`;
+
 
         if (pct > 10) {
           hasHeardSpeech = true;

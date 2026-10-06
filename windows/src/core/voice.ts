@@ -2,7 +2,7 @@ import { Bridge } from "./bridge";
 import { State } from "./state";
 import { Sound } from "./sound";
 
-function encodeWav(samples: Float32Array, sampleRate = 16000): Uint8Array {
+export function encodeWav(samples: Float32Array, sampleRate = 16000): Uint8Array {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
 
@@ -35,7 +35,7 @@ function encodeWav(samples: Float32Array, sampleRate = 16000): Uint8Array {
   return new Uint8Array(buffer);
 }
 
-function uint8ToBase64(uint8: Uint8Array): string {
+export function uint8ToBase64(uint8: Uint8Array): string {
   let binary = "";
   const len = uint8.byteLength;
   for (let i = 0; i < len; i++) {
@@ -150,8 +150,8 @@ export class VoiceEngine {
     try {
       const audioConstraints: MediaTrackConstraints = {
         echoCancellation: true,
-        noiseSuppression: false,
-        autoGainControl: true,
+        noiseSuppression: true,
+        autoGainControl: false,
       };
       if (State.settings.voiceInputDevice && State.settings.voiceInputDevice !== "default") {
         audioConstraints.deviceId = { exact: State.settings.voiceInputDevice };
@@ -257,19 +257,25 @@ export class VoiceEngine {
 
   private startVadMonitoring() {
     if (!this.analyser) return;
-    const buffer = new Uint8Array(this.analyser.frequencyBinCount);
+    const buffer = new Uint8Array(this.analyser.fftSize);
     let hasSpoken = false;
     let speechFrameCount = 0;
 
     this.vadInterval = window.setInterval(() => {
       if (!this.analyser) return;
-      this.analyser.getByteFrequencyData(buffer);
+      // Settings may change while listening: apply the boost live.
+      if (this.gainNode) this.gainNode.gain.value = State.settings.voiceMicGain || 2.0;
+      this.analyser.getByteTimeDomainData(buffer);
 
-      let sum = 0;
-      for (let i = 0; i < buffer.length; i++) sum += buffer[i];
-      const avg = sum / buffer.length;
+      // RMS on the boosted waveform: linear, so the boost really moves the threshold.
+      let sq = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        const v = (buffer[i] - 128) / 128;
+        sq += v * v;
+      }
+      const rms = Math.sqrt(sq / buffer.length);
 
-      if (avg > 6) {
+      if (rms > 0.02) {
         speechFrameCount++;
         if (speechFrameCount >= 3) hasSpoken = true;
         if (this.silenceTimer != null) {

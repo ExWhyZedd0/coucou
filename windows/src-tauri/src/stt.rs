@@ -72,6 +72,19 @@ pub fn transcribe_local_whisper(audio_bytes: &[u8], lang: &str) -> Result<String
         lang.split('-').next().unwrap_or(lang)
     };
 
+    match crate::whisper_server::transcribe(
+        &wav_path_str,
+        "auto",
+        "Halo, percakapan dalam bahasa Indonesia atau Inggris.",
+    ) {
+        Ok(text) => {
+            let _ = std::fs::remove_file(&temp_wav);
+            crate::log::line(format!("stt local whisper (server) transcribed: '{text}'"));
+            return Ok(text);
+        }
+        Err(e) => crate::log::line(format!("stt whisper server unavailable, one-shot fallback: {e}")),
+    }
+
     let script = format!(
         r#"
 import sys, warnings

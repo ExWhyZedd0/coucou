@@ -15,6 +15,7 @@ mod local_chat;
 mod voice_wake;
 mod tts;
 mod stt;
+mod whisper_server;
 mod web_access;
 
 use std::sync::atomic::Ordering;
@@ -86,9 +87,9 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     if voice_changed {
         if settings.voice_enabled {
-            voice_wake::start_listener(app.clone(), &settings.voice_wake_word);
+            whisper_server::warm_up();
         } else {
-            voice_wake::stop_listener();
+            whisper_server::stop();
         }
     }
     if screen_changed {
@@ -421,6 +422,9 @@ pub fn run() {
             stt::stt_transcribe,
             voice_wake::start_wake_word_listener,
             voice_wake::stop_wake_word_listener,
+            whisper_server::wake_transcribe,
+            whisper_server::wake_server_warm_up,
+            whisper_server::wake_server_stop,
             web_search,
             web_fetch,
         ])
@@ -449,7 +453,7 @@ pub fn run() {
             pipe::start(handle.clone());
             integrations::start(handle.clone());
             if loaded.voice_enabled {
-                voice_wake::start_listener(handle.clone(), &loaded.voice_wake_word);
+                whisper_server::warm_up();
             }
             Ok(())
         })

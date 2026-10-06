@@ -4,7 +4,7 @@ import "./style.css";
 import { Bridge, IS_TAURI, onEvent } from "./core/bridge";
 import { Sound } from "./core/sound";
 import { State, type Settings } from "./core/state";
-import { Voice } from "./core/voice";
+import { Wake } from "./core/wake";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
@@ -60,6 +60,7 @@ async function main() {
     island.applySettings();
     State.loadIntegrationTasks();
     void refreshConfigured();
+    void Wake.sync();
   });
 
   registerHookHandlers(island);
@@ -67,7 +68,7 @@ async function main() {
 
   island.launch();
 
-  Voice.initWakeWord(() => {
+  Wake.start(() => {
     island.alert("prompt");
   });
 
