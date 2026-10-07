@@ -7,6 +7,8 @@ import { State, type Settings } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
+import { VoiceListenerEngine } from "./voice/listener";
+import { AudioCore } from "./voice/audio_core";
 
 async function main() {
   const root = document.getElementById("root");
@@ -55,16 +57,78 @@ async function main() {
 
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {
+    const prevWake = State.settings.voiceWakeWordEnabled;
+    const prevDevice = State.settings.voiceMicrophoneDevice;
+    const prevBoost = State.settings.voicePreampBoost;
     State.settings = { ...State.settings, ...s };
     island.applySettings();
     State.loadIntegrationTasks();
     void refreshConfigured();
+
+    if (State.settings.voiceWakeWordEnabled && !prevWake) {
+      void VoiceListenerEngine.startListening();
+    } else if (!State.settings.voiceWakeWordEnabled && prevWake) {
+      void VoiceListenerEngine.stopListening();
+    } else if (State.settings.voiceWakeWordEnabled) {
+      if (s.voiceMicrophoneDevice !== prevDevice || s.voicePreampBoost !== prevBoost) {
+        AudioCore.setPreampBoost(s.voicePreampBoost ?? 3.0);
+        AudioCore.stop();
+        void AudioCore.start(s.voiceMicrophoneDevice);
+      }
+    }
+  });
+
+  await onEvent<string>("global-shortcut", (action) => {
+    if (!State.settings.globalShortcutsEnabled) return;
+    switch (action) {
+      case "openChat":
+        island.reveal();
+        island.setView("prompt");
+        break;
+      case "goToAlert":
+        if (State.pendingApproval) {
+          island.alert("approval");
+        }
+        break;
+      case "nextPill": {
+        const tasks = State.tasks;
+        if (tasks.length > 0) {
+          const idx = tasks.findIndex((t) => t.id === State.focusId);
+          const next = tasks[(idx + 1) % tasks.length];
+          State.setFocus(next.id);
+        }
+        break;
+      }
+      case "prevPill": {
+        const tasks = State.tasks;
+        if (tasks.length > 0) {
+          const idx = tasks.findIndex((t) => t.id === State.focusId);
+          const prev = tasks[(idx - 1 + tasks.length) % tasks.length];
+          State.setFocus(prev.id);
+        }
+        break;
+      }
+      case "muteToggle":
+        island.actions.toggleSound();
+        break;
+      case "desktopToggle":
+        void Bridge.desktopMochiToggle();
+        break;
+      case "wardrobeToggle":
+        island.reveal();
+        island.setView(State.view === "wardrobe" ? "overview" : "wardrobe");
+        break;
+    }
   });
 
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
 
   island.launch();
+
+  if (State.settings.voiceWakeWordEnabled) {
+    void VoiceListenerEngine.startListening();
+  }
 
   // In a plain browser there is no wake strip behind the cursor: make the whole
   // page wake the island so the visuals can be checked with `npm run dev`.

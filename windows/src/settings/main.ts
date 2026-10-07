@@ -1,11 +1,12 @@
-// Settings window — the place where anything that writes to disk is confirmed.
-// Stage 2 covers the Claude Code hooks and the general preferences; API keys and
-// integrations land here too in a later stage.
+// Settings window — comprehensive preferences, hooks, multi-provider AI keys, and wardrobe.
 
 import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
-import { h, clear } from "../views/dom";
+import { OUTFIT_CATALOG, type Outfit } from "../mochi/outfits";
+import { h, clear, svg } from "../views/dom";
+import { ICONS } from "../views/icons";
+import { AudioCore, unlockAndEnumerateMicrophones } from "../voice/audio_core";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let version = "";
@@ -16,7 +17,7 @@ async function save() {
   await Bridge.saveSettings(settings);
 }
 
-// ── Reusable bits ─────────────────────────────────────────────────────────────
+// ── Reusable components ───────────────────────────────────────────────────────
 
 function toggle(on: boolean, onChange: (v: boolean) => void): HTMLElement {
   const el = h("button", { class: on ? "switch on" : "switch", "aria-pressed": on });
@@ -41,66 +42,66 @@ function renderDiff(text: string): HTMLElement {
   return box;
 }
 
-// ── Claude Code section ───────────────────────────────────────────────────────
+// ── Multi-Agent Hooks Section ─────────────────────────────────────────────────
 
-function claudeSection(status: HookStatus): HTMLElement {
-  const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
-  const section = h(
-    "section",
-    {},
-    h("h2", {}, statusDot(status.installed), h("span", { text: "Claude Code" })),
+interface AgentHookDef {
+  id: string;
+  name: string;
+  desc: string;
+}
+
+const AGENTS: AgentHookDef[] = [
+  { id: "claude", name: "Claude Code", desc: "Hooks into Claude Code CLI for approvals and notifications." },
+  { id: "gemini", name: "Gemini CLI", desc: "Hooks into Google Gemini CLI settings." },
+  { id: "antigravity", name: "Antigravity (agy)", desc: "Hooks into Antigravity agent CLI." },
+  { id: "codex", name: "Codex", desc: "Hooks into Codex CLI hooks configuration." },
+];
+
+function agentCard(agent: AgentHookDef, initialStatus?: HookStatus): HTMLElement {
+  const status: HookStatus = initialStatus ?? {
+    installed: false,
+    settingsPath: "",
+    hookPath: "",
+    hookReady: false,
+  };
+
+  const body = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
+  const headDot = statusDot(status.installed);
+  const card = h(
+    "div",
+    { class: "agent-card", style: "border:1px solid var(--hairline);border-radius:10px;padding:12px 14px;background:rgba(255,255,255,0.02)" },
+    h("div", { class: "row", style: "justify-content:space-between;margin-bottom:6px" },
+      h("strong", { style: "display:flex;align-items:center;gap:6px" }, headDot, h("span", { text: agent.name })),
+      h("span", { class: "hint", text: status.installed ? "Active" : "Not hooked" }),
+    ),
     body,
   );
 
   const rebuild = async () => {
-    const fresh = await Bridge.hooksStatus();
+    const fresh = await Bridge.hooksStatusFor(agent.id);
     if (fresh) Object.assign(status, fresh);
+    headDot.style.background = status.installed ? "#22c55e" : "#f4505e";
     clear(body);
     draw();
-    const head = section.querySelector("h2")!;
-    clear(head);
-    head.append(statusDot(status.installed), h("span", { text: "Claude Code" }));
   };
 
   function draw() {
     body.append(
-      h("div", {
-        class: "hint",
-        text: status.installed
-          ? "Coucou is hooked into your Claude Code sessions. Tool calls, questions and permission requests show up in the island, and you can answer them there."
-          : "Install the hooks to see your Claude Code sessions in the island and approve permissions without leaving what you are doing.",
-      }),
+      h("div", { class: "hint", text: agent.desc }),
       h("div", { class: "row" },
-        h("label", { text: "settings.json" }),
-        h("span", { class: "path", text: status.settingsPath }),
-      ),
-      h("div", { class: "row" },
-        h("label", { text: "Relay" }),
-        h("span", { class: "path", text: status.hookPath }),
-        statusDot(status.hookReady),
+        h("label", { style: "min-width:100px", text: "Config file" }),
+        h("span", { class: "path", text: status.settingsPath || "Default location" }),
       ),
     );
 
-    if (!status.hookReady) {
-      body.append(h("div", {
-        class: "notice warn",
-        text: "coucou-hook.exe is not in place yet. Restart Coucou; if it still fails, build it with `cargo build -p coucou-hook`.",
-      }));
-    }
-
-    const actions = h("div", { class: "row" });
+    const actions = h("div", { class: "row", style: "margin-top:4px" });
     const install = h("button", {
       class: "primary",
       text: status.installed ? "Reinstall hooks…" : "Install hooks…",
       onclick: () => showPreview(true),
     });
-    // Writing hook commands that point at a relay which isn't there would give
-    // every Claude Code session a broken hook and nothing to show for it.
-    if (!status.hookReady) {
-      install.disabled = true;
-      install.title = "The relay isn't installed yet.";
-    }
     actions.append(install);
+
     if (status.installed) {
       actions.append(h("button", {
         class: "danger",
@@ -114,105 +115,107 @@ function claudeSection(status: HookStatus): HTMLElement {
   async function showPreview(install: boolean) {
     let preview;
     try {
-      preview = await Bridge.hooksPreview(install);
+      preview = await Bridge.hooksPreviewFor(agent.id, install);
     } catch (err) {
-      // An unreadable or invalid settings.json stops here rather than being
-      // treated as empty and written over.
       clear(body);
-      body.append(
-        h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }),
-        h("div", { class: "row" }, h("button", {
-          text: "Back",
-          onclick: () => { clear(body); draw(); },
-        })),
-      );
+      body.append(h("div", { class: "notice err", text: `Could not prepare hooks: ${String(err)}` }));
+      window.setTimeout(() => void rebuild(), 3000);
       return;
     }
-    if (!preview) return;
+
     clear(body);
     body.append(
       h("div", {
         class: "hint",
         text: install
-          ? "This is exactly what will change in your settings.json. Your own hooks are left untouched."
-          : "This removes Coucou's entries only. Your own hooks are left untouched.",
+          ? `Here is the diff Coucou will write to ${agent.name}'s config. Verify the changes:`
+          : `Coucou will remove its hooks from ${agent.name}'s config:`,
       }),
       renderDiff(preview.diff),
-      h("div", { class: "row" },
-        h("span", { class: "path", text: `Backup → ${preview.backup}` }),
-      ),
     );
+
     const confirm = h("button", {
       class: install ? "primary" : "danger",
-      text: install ? "Back up and write" : "Back up and remove",
+      text: install ? "Confirm and write" : "Confirm uninstall",
     });
     confirm.addEventListener("click", async () => {
       confirm.disabled = true;
       try {
-        const backup = await Bridge.hooksApply(install, preview.fingerprint);
+        const backup = await Bridge.hooksApplyFor(agent.id, install, preview.fingerprint);
         clear(body);
         body.append(h("div", {
           class: "notice ok",
-          text: `Done. Previous settings saved as ${backup}. Open a new Claude Code session to pick the hooks up.`,
+          text: `Done. Backup saved as ${backup}.`,
         }));
-        window.setTimeout(() => void rebuild(), 2600);
+        window.setTimeout(() => void rebuild(), 2500);
       } catch (err) {
         confirm.disabled = false;
         body.append(h("div", { class: "notice err", text: `Could not write: ${String(err)}` }));
       }
     });
-    body.append(h("div", { class: "row" }, confirm, h("button", {
-      text: "Cancel",
-      onclick: () => { clear(body); draw(); },
-    })));
+
+    body.append(
+      h("div", { class: "row" },
+        confirm,
+        h("button", { text: "Cancel", onclick: () => { clear(body); draw(); } }),
+      ),
+    );
   }
 
-  draw();
-  return section;
+  void rebuild();
+  return card;
 }
 
-// ── Claude API section ────────────────────────────────────────────────────────
+function agentsSection(): HTMLElement {
+  const container = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
+  for (const a of AGENTS) {
+    container.append(agentCard(a));
+  }
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { class: "section-icon" }, svg(ICONS.robot, 15)), h("span", { text: "Multi-Agent Hooks & CLIs" })),
+    h("div", { class: "hint", text: "Integrate Coucou into your AI coding agent CLIs to intercept tool calls, diffs, and approvals." }),
+    container,
+  );
+}
 
-const MODELS: [string, string][] = [
-  ["claude-opus-5", "Claude Opus 5"],
-  ["claude-sonnet-5", "Claude Sonnet 5"],
-  ["claude-haiku-4-5", "Claude Haiku 4.5"],
-];
+// ── Multi-Provider AI section ─────────────────────────────────────────────────
 
-function apiSection(hasKey: boolean): HTMLElement {
-  const dot = statusDot(hasKey);
-  const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — the chat needs one." });
-
+function secretRow(
+  secretKey: string,
+  label: string,
+  placeholder: string,
+  initialPresent: boolean,
+): HTMLElement {
+  const dot = statusDot(initialPresent);
   const field = h("input", {
     type: "password",
-    placeholder: hasKey ? "••••••••••••  (stored)" : "sk-ant-...",
+    placeholder: initialPresent ? "•••••••••••• (stored)" : placeholder,
     style: "flex:1 1 auto;min-width:0",
     autocomplete: "off",
     spellcheck: "false",
   }) as HTMLInputElement;
 
-  const saveBtn = h("button", { class: "primary", text: "Save key" });
-  const clearBtn = h("button", { class: "danger", text: "Remove" });
+  const saveBtn = h("button", { class: "primary", text: "Save" });
+  const clearBtn = h("button", { class: "danger", text: "Remove", style: initialPresent ? "" : "display:none" });
   const feedback = h("div", {});
 
   async function refresh() {
-    const present = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
-    dot.style.background = present ? "#22c55e" : "#f4505e";
-    state.textContent = present
-      ? "Key saved in the Windows Credential Manager."
-      : "No key yet — the chat needs one.";
-    field.placeholder = present ? "••••••••••••  (stored)" : "sk-ant-...";
-    clearBtn.style.display = present ? "" : "none";
+    const ok = (await Bridge.secretPresent(secretKey)) ?? false;
+    dot.style.background = ok ? "#22c55e" : "#f4505e";
+    field.placeholder = ok ? "•••••••••••• (stored)" : placeholder;
+    clearBtn.style.display = ok ? "" : "none";
   }
 
   saveBtn.addEventListener("click", async () => {
-    const value = field.value.trim();
-    if (!value) return;
+    const val = field.value.trim();
+    if (!val) return;
     clear(feedback);
     try {
-      await Bridge.secretSet("anthropic-api-key", value);
+      await Bridge.secretSet(secretKey, val);
       field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
+      feedback.append(h("div", { class: "notice ok", text: "Key saved to Windows Credential Manager." }));
       await refresh();
     } catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
@@ -222,7 +225,7 @@ function apiSection(hasKey: boolean): HTMLElement {
   clearBtn.addEventListener("click", async () => {
     clear(feedback);
     try {
-      await Bridge.secretClear("anthropic-api-key");
+      await Bridge.secretClear(secretKey);
       feedback.append(h("div", { class: "notice ok", text: "Key removed." }));
       await refresh();
     } catch (err) {
@@ -230,27 +233,254 @@ function apiSection(hasKey: boolean): HTMLElement {
     }
   });
 
-  const model = h("select", {}) as HTMLSelectElement;
-  for (const [id, label] of MODELS) model.append(h("option", { value: id, text: label }));
-  if (!MODELS.some(([id]) => id === settings.model)) {
-    model.append(h("option", { value: settings.model, text: settings.model }));
-  }
-  model.value = settings.model;
-  model.addEventListener("change", () => {
-    settings.model = model.value;
+  return h(
+    "div",
+    { style: "display:flex;flex-direction:column;gap:6px" },
+    h("div", { class: "row" }, dot, h("label", { style: "min-width:110px", text: label }), field, saveBtn, clearBtn),
+    feedback,
+  );
+}
+
+function aiProvidersSection(keysPresent: Record<string, boolean>): HTMLElement {
+  // Provider selector
+  const providerSelect = h("select", {}) as HTMLSelectElement;
+  const providers = [
+    { id: "anthropic", label: "Anthropic Claude" },
+    { id: "gemini", label: "Google Gemini" },
+    { id: "openai", label: "OpenAI" },
+    { id: "ollama", label: "Ollama (Local)" },
+    { id: "lmstudio", label: "LM Studio (Local)" },
+  ];
+  for (const p of providers) providerSelect.append(h("option", { value: p.id, text: p.label }));
+  providerSelect.value = settings.chatProvider || "anthropic";
+
+  // Quick Toggle: Claude (Cloud) vs Local LLM
+  const isLocal = settings.chatProvider === "ollama" || settings.chatProvider === "lmstudio";
+  const modeDot = statusDot(isLocal);
+  const modeHint = h("span", {
+    class: "hint",
+    text: isLocal ? "Local LLM active (Zero Cloud, 100% Private)" : "Claude Cloud active (Anthropic)",
+  });
+  const localToggle = toggle(isLocal, (active) => {
+    if (active) {
+      settings.chatProvider = settings.chatProvider === "lmstudio" ? "lmstudio" : "ollama";
+    } else {
+      settings.chatProvider = "anthropic";
+    }
+    providerSelect.value = settings.chatProvider;
+    modeDot.style.background = active ? "var(--green)" : "#8AB4F8";
+    modeHint.textContent = active
+      ? "Local LLM active (Zero Cloud, 100% Private)"
+      : "Claude Cloud active (Anthropic)";
     void save();
   });
 
-  clearBtn.style.display = hasKey ? "" : "none";
+  providerSelect.addEventListener("change", () => {
+    settings.chatProvider = providerSelect.value;
+    const nowLocal = settings.chatProvider === "ollama" || settings.chatProvider === "lmstudio";
+    localToggle.classList.toggle("on", nowLocal);
+    modeDot.style.background = nowLocal ? "var(--green)" : "#8AB4F8";
+    modeHint.textContent = nowLocal
+      ? "Local LLM active (Zero Cloud, 100% Private)"
+      : "Claude Cloud active (Anthropic)";
+    void save();
+  });
+
+  // Claude models
+  const claudeModels = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-3-5-sonnet-20241022"];
+  const claudeSelect = h("select", {}) as HTMLSelectElement;
+  for (const m of claudeModels) claudeSelect.append(h("option", { value: m, text: m }));
+  claudeSelect.value = settings.model || "claude-opus-5";
+  claudeSelect.addEventListener("change", () => { settings.model = claudeSelect.value; void save(); });
+
+  // Gemini models
+  const geminiModels = ["gemini-2.0-flash", "gemini-2.0-pro-exp-02-05", "gemini-1.5-pro", "gemini-1.5-flash"];
+  const geminiSelect = h("select", {}) as HTMLSelectElement;
+  for (const m of geminiModels) geminiSelect.append(h("option", { value: m, text: m }));
+  geminiSelect.value = settings.geminiModel || "gemini-2.0-flash";
+  geminiSelect.addEventListener("change", () => { settings.geminiModel = geminiSelect.value; void save(); });
+
+  // OpenAI models
+  const openaiModels = ["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"];
+  const openaiSelect = h("select", {}) as HTMLSelectElement;
+  for (const m of openaiModels) openaiSelect.append(h("option", { value: m, text: m }));
+  openaiSelect.value = settings.openaiModel || "gpt-4o";
+  openaiSelect.addEventListener("change", () => { settings.openaiModel = openaiSelect.value; void save(); });
+
+  // Ollama inputs & dynamic model dropdown
+  const ollamaUrl = h("input", {
+    type: "text",
+    value: settings.ollamaUrl || "http://localhost:11434",
+    style: "flex:1 1 auto;min-width:180px",
+  }) as HTMLInputElement;
+  ollamaUrl.addEventListener("change", () => { settings.ollamaUrl = ollamaUrl.value; void save(); });
+
+  const ollamaModelSelect = h("select", { style: "flex:1 1 auto;min-width:140px" }) as HTMLSelectElement;
+  const curOllama = settings.ollamaModel || "llama3.2";
+  ollamaModelSelect.append(h("option", { value: curOllama, text: curOllama }));
+  ollamaModelSelect.value = curOllama;
+  ollamaModelSelect.addEventListener("change", () => {
+    settings.ollamaModel = ollamaModelSelect.value;
+    void save();
+  });
+
+  const ollamaStatus = h("span", { class: "hint" });
+  const ollamaTestBtn = h("button", { text: "Test", class: "btn" });
+  ollamaTestBtn.addEventListener("click", async () => {
+    ollamaStatus.textContent = "Checking…";
+    settings.ollamaUrl = ollamaUrl.value;
+    await save();
+    const ok = await Bridge.aiCheckLocalServer("ollama");
+    ollamaStatus.textContent = ok ? "✓ Connected" : "✗ Not reachable";
+    ollamaStatus.style.color = ok ? "var(--green)" : "var(--red)";
+  });
+
+  const ollamaFetchBtn = h("button", { text: "Fetch Models", class: "btn" });
+  ollamaFetchBtn.addEventListener("click", async () => {
+    ollamaFetchBtn.textContent = "Fetching…";
+    ollamaStatus.textContent = "Querying Ollama tags…";
+    ollamaStatus.style.color = "var(--dim)";
+    try {
+      settings.ollamaUrl = ollamaUrl.value;
+      await save();
+      const models = await Bridge.aiListModels("ollama");
+      if (models && models.length > 0) {
+        clear(ollamaModelSelect);
+        for (const m of models) {
+          ollamaModelSelect.append(h("option", { value: m, text: m }));
+        }
+        if (models.includes(settings.ollamaModel)) {
+          ollamaModelSelect.value = settings.ollamaModel;
+        } else {
+          settings.ollamaModel = models[0];
+          ollamaModelSelect.value = models[0];
+          await save();
+        }
+        ollamaStatus.textContent = `✓ ${models.length} model(s) available`;
+        ollamaStatus.style.color = "var(--green)";
+      } else {
+        ollamaStatus.textContent = "No models found in Ollama";
+        ollamaStatus.style.color = "var(--red)";
+      }
+    } catch {
+      ollamaStatus.textContent = "Server unreachable";
+      ollamaStatus.style.color = "var(--red)";
+    } finally {
+      ollamaFetchBtn.textContent = "Fetch Models";
+    }
+  });
+
+  // LM Studio inputs & dynamic model dropdown
+  const lmUrl = h("input", {
+    type: "text",
+    value: settings.lmstudioUrl || "http://localhost:1234",
+    style: "flex:1 1 auto;min-width:180px",
+  }) as HTMLInputElement;
+  lmUrl.addEventListener("change", () => { settings.lmstudioUrl = lmUrl.value; void save(); });
+
+  const lmModelSelect = h("select", { style: "flex:1 1 auto;min-width:140px" }) as HTMLSelectElement;
+  const curLm = settings.lmstudioModel || "local-model";
+  lmModelSelect.append(h("option", { value: curLm, text: curLm }));
+  lmModelSelect.value = curLm;
+  lmModelSelect.addEventListener("change", () => {
+    settings.lmstudioModel = lmModelSelect.value;
+    void save();
+  });
+
+  const lmStatus = h("span", { class: "hint" });
+  const lmTestBtn = h("button", { text: "Test", class: "btn" });
+  lmTestBtn.addEventListener("click", async () => {
+    lmStatus.textContent = "Checking…";
+    settings.lmstudioUrl = lmUrl.value;
+    await save();
+    const ok = await Bridge.aiCheckLocalServer("lmstudio");
+    lmStatus.textContent = ok ? "✓ Connected" : "✗ Not reachable";
+    lmStatus.style.color = ok ? "var(--green)" : "var(--red)";
+  });
+
+  const lmFetchBtn = h("button", { text: "Fetch Models", class: "btn" });
+  lmFetchBtn.addEventListener("click", async () => {
+    lmFetchBtn.textContent = "Fetching…";
+    lmStatus.textContent = "Querying LM Studio /v1/models…";
+    lmStatus.style.color = "var(--dim)";
+    try {
+      settings.lmstudioUrl = lmUrl.value;
+      await save();
+      const models = await Bridge.aiListModels("lmstudio");
+      if (models && models.length > 0) {
+        clear(lmModelSelect);
+        for (const m of models) {
+          lmModelSelect.append(h("option", { value: m, text: m }));
+        }
+        if (models.includes(settings.lmstudioModel)) {
+          lmModelSelect.value = settings.lmstudioModel;
+        } else {
+          settings.lmstudioModel = models[0];
+          lmModelSelect.value = models[0];
+          await save();
+        }
+        lmStatus.textContent = `✓ ${models.length} model(s) loaded`;
+        lmStatus.style.color = "var(--green)";
+      } else {
+        lmStatus.textContent = "No models currently loaded in LM Studio";
+        lmStatus.style.color = "var(--red)";
+      }
+    } catch {
+      lmStatus.textContent = "Server unreachable";
+      lmStatus.style.color = "var(--red)";
+    } finally {
+      lmFetchBtn.textContent = "Fetch Models";
+    }
+  });
 
   return h(
     "section",
     {},
-    h("h2", {}, dot, h("span", { text: "Claude" })),
-    state,
-    h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
-    h("div", { class: "row" }, h("label", { text: "Model" }), model),
-    feedback,
+    h("h2", {}, h("span", { class: "section-icon" }, svg(ICONS.sparkles, 15)), h("span", { text: "AI Chat Providers & Models" })),
+    h("div", { class: "row", style: "justify-content:space-between;padding-bottom:6px" },
+      h("strong", { style: "display:flex;align-items:center;gap:6px" },
+        modeDot,
+        h("span", { text: "Claude (Cloud) vs Local LLM" }),
+      ),
+      h("div", { class: "row", style: "gap:10px" },
+        modeHint,
+        localToggle,
+      ),
+    ),
+    h("div", { class: "row" }, h("label", { text: "Default provider" }), providerSelect),
+    h("hr", { style: "border:none;border-top:1px solid var(--hairline);margin:4px 0" }),
+    secretRow("anthropic-api-key", "Anthropic Claude", "sk-ant-...", keysPresent["anthropic-api-key"] ?? false),
+    h("div", { class: "row" }, h("label", { style: "min-width:110px", text: "Claude model" }), claudeSelect),
+    h("hr", { style: "border:none;border-top:1px solid var(--hairline);margin:4px 0" }),
+    secretRow("gemini-api-key", "Google Gemini", "AIzaSy...", keysPresent["gemini-api-key"] ?? false),
+    h("div", { class: "row" }, h("label", { style: "min-width:110px", text: "Gemini model" }), geminiSelect),
+    h("hr", { style: "border:none;border-top:1px solid var(--hairline);margin:4px 0" }),
+    secretRow("openai-api-key", "OpenAI", "sk-...", keysPresent["openai-api-key"] ?? false),
+    h("div", { class: "row" }, h("label", { style: "min-width:110px", text: "OpenAI model" }), openaiSelect),
+    h("hr", { style: "border:none;border-top:1px solid var(--hairline);margin:4px 0" }),
+    h("div", { class: "row" },
+      h("label", { style: "min-width:110px", text: "Ollama URL" }),
+      ollamaUrl,
+      ollamaTestBtn,
+      ollamaStatus,
+    ),
+    h("div", { class: "row" },
+      h("label", { style: "min-width:110px", text: "Ollama model" }),
+      ollamaModelSelect,
+      ollamaFetchBtn,
+    ),
+    h("hr", { style: "border:none;border-top:1px solid var(--hairline);margin:4px 0" }),
+    h("div", { class: "row" },
+      h("label", { style: "min-width:110px", text: "LM Studio URL" }),
+      lmUrl,
+      lmTestBtn,
+      lmStatus,
+    ),
+    h("div", { class: "row" },
+      h("label", { style: "min-width:110px", text: "LM Studio model" }),
+      lmModelSelect,
+      lmFetchBtn,
+    ),
   );
 }
 
@@ -260,11 +490,15 @@ interface IntegrationDef {
   id: string;
   name: string;
   color: string;
-  /** Credential Manager keys, in the order they are shown. */
   fields: { key: string; label: string; placeholder: string; secret: boolean }[];
 }
 
 const INTEGRATIONS: IntegrationDef[] = [
+  { id: "agent_cursor", name: "Cursor IDE", color: "#38BDF8", fields: [] },
+  { id: "agent_codex", name: "Codex CLI", color: "#2DD4BF", fields: [] },
+  { id: "agent_antigravity", name: "Antigravity Agent", color: "#9333EA", fields: [] },
+  { id: "agent_gemini", name: "Gemini CLI", color: "#8AB4F8", fields: [] },
+  { id: "integration_music", name: "Now Playing (Media)", color: "#EC4899", fields: [] },
   { id: "integration_stripe", name: "Stripe", color: "#0570DE",
     fields: [{ key: "stripe-api-key", label: "Secret key", placeholder: "sk_live_…", secret: true }] },
   { id: "integration_github", name: "GitHub", color: "#F4505E",
@@ -290,72 +524,106 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
   const note = h("div", { class: "hint" });
   const list = h("div", { style: "display:flex;flex-direction:column;gap:14px" });
 
+  // Main Pinned Pill selector
+  const mainPillSelect = h("select", { style: "min-width:180px" }) as HTMLSelectElement;
+  const mainPillOptions = [
+    { id: "integration_claude", label: "VS Code (Claude Code)" },
+    { id: "agent_cursor", label: "Cursor IDE" },
+    { id: "agent_codex", label: "Codex CLI" },
+    { id: "agent_antigravity", label: "Antigravity Agent" },
+    { id: "agent_gemini", label: "Gemini CLI" },
+  ];
+  for (const opt of mainPillOptions) {
+    mainPillSelect.append(h("option", { value: opt.id, text: opt.label }));
+  }
+  mainPillSelect.value = settings.mainPill || "integration_claude";
+  mainPillSelect.addEventListener("change", () => {
+    settings.mainPill = mainPillSelect.value;
+    void save();
+    updateNote();
+  });
+
+  const mainPillRow = h(
+    "div",
+    { class: "row", style: "justify-content:space-between;padding-bottom:12px;border-bottom:1px solid var(--hairline)" },
+    h("strong", { style: "display:flex;align-items:center;gap:6px" },
+      statusDot(true),
+      h("span", { text: "Primary Pinned Pill (Next to Mochi)" }),
+    ),
+    h("div", { class: "row", style: "gap:10px" },
+      mainPillSelect,
+      h("span", { class: "hint", text: "Always visible" }),
+    ),
+  );
+
   function updateNote() {
     const used = settings.activeIntegrations.length;
-    note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
+    note.textContent = `Pick up to ${MAX_ACTIVE} secondary pills to show alongside the main pill — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
   }
 
   for (const def of INTEGRATIONS) {
     const active = settings.activeIntegrations.includes(def.id);
     const sw = h("button", { class: active ? "switch on" : "switch" });
     sw.addEventListener("click", () => {
-      const on = settings.activeIntegrations.includes(def.id);
-      if (on) {
-        settings.activeIntegrations = settings.activeIntegrations.filter((x) => x !== def.id);
+      const idx = settings.activeIntegrations.indexOf(def.id);
+      if (idx >= 0) {
+        settings.activeIntegrations.splice(idx, 1);
+        sw.classList.remove("on");
       } else {
         if (settings.activeIntegrations.length >= MAX_ACTIVE) return;
-        settings.activeIntegrations = [...settings.activeIntegrations, def.id];
+        settings.activeIntegrations.push(def.id);
+        sw.classList.add("on");
       }
-      sw.classList.toggle("on", !on);
       updateNote();
       void save();
     });
 
-    const rows = h("div", { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" });
-    for (const field of def.fields) {
-      const input = h("input", {
-        type: field.secret ? "password" : "text",
-        placeholder: present[field.key] ? "••••••••  (stored)" : field.placeholder,
-        autocomplete: "off",
-        spellcheck: "false",
-        style: "flex:1 1 auto;min-width:0",
+    const rows = h("div", { style: "display:flex;flex-direction:column;gap:8px;padding-left:36px" });
+    for (const f of def.fields) {
+      const isSet = present[f.key] ?? false;
+      const inp = h("input", {
+        type: f.secret ? "password" : "text",
+        placeholder: isSet ? "•••••••••••• (stored)" : f.placeholder,
+        style: "flex:1 1 auto",
       }) as HTMLInputElement;
-      const saveBtn = h("button", { text: "Save" });
-      const dotEl = statusDot(present[field.key] ?? false);
-      saveBtn.addEventListener("click", async () => {
-        const value = input.value.trim();
-        try {
-          await Bridge.secretSet(field.key, value);
-          present[field.key] = value.length > 0;
-          input.value = "";
-          input.placeholder = value ? "••••••••  (stored)" : field.placeholder;
-          dotEl.style.background = value ? "#22c55e" : "#f4505e";
-        } catch {
-          dotEl.style.background = "#f5a524";
-        }
+
+      const saveKeyBtn = h("button", { class: "primary", text: "Save" });
+      saveKeyBtn.addEventListener("click", async () => {
+        const val = inp.value.trim();
+        if (!val) return;
+        await Bridge.secretSet(f.key, val);
+        inp.value = "";
+        present[f.key] = true;
+        inp.placeholder = "•••••••••••• (stored)";
       });
-      rows.append(
-        h("div", { class: "row" },
-          h("label", { style: "min-width:104px", text: field.label }),
-          input, saveBtn, dotEl,
-        ),
-      );
+
+      rows.append(h("div", { class: "row" }, statusDot(isSet), h("label", { text: f.label }), inp, saveKeyBtn));
     }
 
-    list.append(
-      h("div", { style: "display:flex;gap:12px;align-items:flex-start" },
-        h("div", { style: "display:flex;align-items:center;gap:8px;min-width:132px;padding-top:4px" },
-          sw,
-          h("i", { class: "dot", style: `background:${def.color}` }),
-          h("span", { style: "font-size:12.5px", text: def.name }),
-        ),
-        rows,
+    const item = h(
+      "div",
+      { style: "display:flex;flex-direction:column;gap:6px" },
+      h("div", { class: "row" },
+        sw,
+        h("i", { class: "dot", style: `background:${def.color}` }),
+        h("span", { style: "font-size:12.5px", text: def.name }),
       ),
     );
+    if (def.fields.length > 0) {
+      item.append(rows);
+    }
+    list.append(item);
   }
 
   updateNote();
-  return h("section", {}, h("h2", {}, h("span", { text: "Integrations" })), note, list);
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { class: "section-icon" }, svg(ICONS.puzzle, 15)), h("span", { text: "Integrations & Agent Pills" })),
+    mainPillRow,
+    note,
+    list,
+  );
 }
 
 // ── General section ───────────────────────────────────────────────────────────
@@ -392,10 +660,21 @@ function generalSection(): HTMLElement {
     void save();
   });
 
+  // Wardrobe outfit selection
+  const outfitSelect = h("select", {}) as HTMLSelectElement;
+  for (const o of OUTFIT_CATALOG) {
+    outfitSelect.append(h("option", { value: o.id, text: `${o.emoji} ${o.label}` }));
+  }
+  outfitSelect.value = (settings.mochiOutfit as Outfit) || "auto";
+  outfitSelect.addEventListener("change", () => {
+    settings.mochiOutfit = outfitSelect.value;
+    void save();
+  });
+
   return h(
     "section",
     {},
-    h("h2", {}, h("span", { text: "General" })),
+    h("h2", {}, h("span", { class: "section-icon" }, svg(ICONS.sliders, 15, { stroke: 2 })), h("span", { text: "General & Appearance" })),
     h("div", { class: "row" },
       h("label", { text: "Sound" }),
       toggle(settings.soundEnabled, (v) => { settings.soundEnabled = v; void save(); }),
@@ -414,7 +693,432 @@ function generalSection(): HTMLElement {
       h("label", { text: "Launch at startup" }),
       toggle(settings.autostart, (v) => { settings.autostart = v; void save(); }),
     ),
+    h("div", { class: "row" },
+      h("label", { text: "Mochi on desktop" }),
+      toggle(settings.mochiOnDesktop, (v) => {
+        settings.mochiOnDesktop = v;
+        if (v) void Bridge.desktopMochiShow();
+        else void Bridge.desktopMochiHide();
+        void save();
+      }),
+      h("span", { class: "hint", text: "Floating desktop companion" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Global shortcuts" }),
+      toggle(settings.globalShortcutsEnabled, (v) => {
+        settings.globalShortcutsEnabled = v;
+        void save();
+      }),
+      h("span", { class: "hint", text: "Ctrl+Alt+Space, Ctrl+Alt+A, etc." }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Mochi's outfit" }),
+      outfitSelect,
+    ),
   );
+}
+
+// ── Mobile Sync & Android Companion Section ──────────────────────────────────
+
+function mobileSyncSection(): HTMLElement {
+  const note = h("p", {
+    class: "hint",
+    style: "margin-bottom:12px",
+    text: "Stream sessions, approvals, and questions to Coucou on your Android phone with zero configuration over LAN. Encrypted with AES-256-GCM.",
+  });
+
+  const card = h("div", {
+    class: "agent-card",
+    style: "border:1px solid var(--hairline);border-radius:10px;padding:14px;background:rgba(255,255,255,0.02);display:flex;flex-direction:column;gap:12px",
+  });
+
+  const section = h("section", {},
+    h("h2", {}, h("span", { class: "section-icon" }, svg(ICONS.mobile, 15)), h("span", { text: "Mobile Companion Sync (Android & iOS)" })),
+    note,
+    card,
+  );
+
+  async function update() {
+    clear(card);
+    const status = await Bridge.syncGetStatus();
+    const isRunning = status?.running ?? false;
+
+    const headDot = statusDot(isRunning);
+    const topRow = h("div", { class: "row", style: "justify-content:space-between" },
+      h("strong", { style: "display:flex;align-items:center;gap:6px" },
+        headDot,
+        h("span", { text: "LAN WebSocket Bridge & mDNS" }),
+      ),
+      toggle(isRunning, async (v) => {
+        await Bridge.syncToggle(v);
+        await update();
+      }),
+    );
+    card.append(topRow);
+
+    if (!isRunning) {
+      card.append(h("div", { class: "hint", text: "Sync server is currently disabled. Toggle on to pair your mobile phone." }));
+      return;
+    }
+
+    const pairing = await Bridge.syncGetPairingData().catch(() => null);
+
+    const devices = status?.connectedDevices ?? [];
+    const deviceList = h("div", { style: "font-size:12px;margin-top:6px;display:flex;flex-direction:column;gap:4px" });
+    if (devices.length === 0) {
+      deviceList.append(h("span", { class: "hint", text: "No mobile device connected yet. Scan QR code with the Coucou Android app." }));
+    } else {
+      for (const d of devices) {
+        deviceList.append(h("div", { class: "row", style: "gap:6px" },
+          statusDot(true),
+          h("strong", { text: d.name }),
+          h("span", { class: "hint", text: `(${d.remoteAddr})` }),
+        ));
+      }
+    }
+
+    const qrContainer = h("div", {
+      style: "display:flex;align-items:center;justify-content:center;background:#16181D;border-radius:12px;padding:8px;width:196px;height:196px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.08)",
+    });
+    if (pairing?.qrSvg) {
+      qrContainer.innerHTML = pairing.qrSvg;
+    }
+
+    const qrCol = h("div", { style: "display:flex;flex-direction:column;align-items:center;gap:8px" },
+      qrContainer,
+      h("span", { class: "hint", style: "font-size:11px", text: "Scan with Coucou Android" }),
+    );
+
+    const infoCol = h("div", { style: "display:flex;flex-direction:column;gap:8px;flex:1" },
+      h("div", { class: "row" },
+        h("label", { style: "min-width:70px", text: "LAN IP" }),
+        h("span", { class: "path", text: `${status?.ip}:${status?.port}` }),
+      ),
+      h("div", { class: "row" },
+        h("label", { style: "min-width:70px", text: "Discovery" }),
+        h("span", { class: "hint", text: "_coucou._tcp.local (mDNS active)" }),
+      ),
+      h("div", { class: "row" },
+        h("label", { style: "min-width:70px", text: "Secret" }),
+        h("span", { class: "path", style: "font-size:10.5px;max-width:180px;overflow:hidden;text-overflow:ellipsis", text: status?.secret ?? "••••" }),
+      ),
+      h("div", { class: "row", style: "margin-top:6px;gap:8px" },
+        h("button", {
+          class: "secondary",
+          text: "Regenerate Key",
+          onclick: async () => {
+            await Bridge.syncRegenerateSecret().catch(() => {});
+            await update();
+          },
+        }),
+        h("button", {
+          class: "secondary",
+          text: "Send Test Ping",
+          onclick: async () => {
+            await Bridge.syncSendTestEvent().catch(() => {});
+          },
+        }),
+      ),
+      deviceList,
+    );
+
+    const mainRow = h("div", { style: "display:flex;gap:18px;align-items:flex-start;margin-top:6px" },
+      qrCol,
+      infoCol,
+    );
+
+    card.append(mainRow);
+  }
+
+  void update();
+  void onEvent("sync-devices-changed", () => { void update(); });
+  return section;
+}
+
+// ── Voice Awake & Neural TTS Section ────────────────────────────────────────
+
+function voiceSettingsSection(): HTMLElement {
+  const note = h("p", {
+    class: "hint",
+    style: "margin-bottom:12px",
+    text: "Zero-cloud local voice interaction, persistent Whisper GPU transcription, and neural speech synthesis (<50ms latency). Drives real-time mouth visemes on Mochi.",
+  });
+
+  const card = h("div", {
+    class: "agent-card",
+    style: "border:1px solid var(--hairline);border-radius:10px;padding:14px;background:rgba(255,255,255,0.02);display:flex;flex-direction:column;gap:12px",
+  });
+
+  const section = h("section", {},
+    h("h2", {}, h("span", { class: "section-icon" }, svg(ICONS.mic, 15)), h("span", { text: "Voice Awake, Audio Core & Neural TTS" })),
+    note,
+    card,
+  );
+
+  async function render() {
+    clear(card);
+
+    // 1. Wake word enable toggle
+    const wakeRow = h("div", { class: "row", style: "justify-content:space-between" },
+      h("strong", { style: "display:flex;align-items:center;gap:6px" },
+        statusDot(settings.voiceWakeWordEnabled),
+        h("span", { text: "Voice Awake Detection" }),
+      ),
+      toggle(settings.voiceWakeWordEnabled, (v) => {
+        settings.voiceWakeWordEnabled = v;
+        void save();
+        void render();
+      }),
+    );
+
+    // 2. Wake phrase selector (English & Indonesian)
+    const phraseSelect = h("select", {}) as HTMLSelectElement;
+    const phrases = [
+      { id: "both", label: "Both ('Hey Mochi' / 'Hai Mochi' & 'Coucou' / 'Kuku')" },
+      { id: "hey_mochi", label: "'Hey Mochi' / 'Hai Mochi'" },
+      { id: "coucou", label: "'Coucou' / 'Kuku'" },
+    ];
+    for (const p of phrases) {
+      phraseSelect.append(h("option", { value: p.id, text: p.label }));
+    }
+    phraseSelect.value = settings.voiceWakePhrase || "both";
+    phraseSelect.addEventListener("change", () => {
+      settings.voiceWakePhrase = phraseSelect.value;
+      void save();
+    });
+
+    const phraseRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Wake phrase" }),
+      phraseSelect,
+    );
+
+    // 2b. Microphone device selector & Grant Permission Button
+    const micSelect = h("select", { style: "flex:1 1 auto;min-width:180px" }) as HTMLSelectElement;
+    micSelect.append(h("option", { value: "default", text: "Default System Microphone" }));
+
+    const refreshMics = async (grant = false) => {
+      let mics: MediaDeviceInfo[] = [];
+      if (grant) {
+        mics = await unlockAndEnumerateMicrophones();
+      } else if (typeof navigator !== "undefined" && navigator.mediaDevices?.enumerateDevices) {
+        const devs = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+        mics = devs.filter((d) => d.kind === "audioinput");
+      }
+
+      if (mics.length > 0) {
+        clear(micSelect);
+        micSelect.append(h("option", { value: "default", text: "Default System Microphone" }));
+        for (const mic of mics) {
+          const label = mic.label || `Microphone (${mic.deviceId.slice(0, 8)})`;
+          micSelect.append(h("option", { value: mic.deviceId, text: label }));
+        }
+        micSelect.value = settings.voiceMicrophoneDevice || "default";
+      }
+    };
+
+    void refreshMics(false);
+
+    micSelect.addEventListener("change", () => {
+      settings.voiceMicrophoneDevice = micSelect.value;
+      void save();
+      AudioCore.stop();
+      void AudioCore.start(settings.voiceMicrophoneDevice);
+    });
+
+    const grantMicBtn = h("button", {
+      class: "secondary",
+      text: "Grant Permission / Refresh",
+      title: "Requests browser mic permission to unlock real hardware device names (Realtek, USB, etc.)",
+      onclick: async () => {
+        grantMicBtn.textContent = "Detecting…";
+        await refreshMics(true);
+        AudioCore.stop();
+        await AudioCore.start(settings.voiceMicrophoneDevice);
+        grantMicBtn.textContent = "Refreshed ✓";
+        setTimeout(() => { grantMicBtn.textContent = "Grant Permission / Refresh"; }, 2500);
+      },
+    });
+
+    const micRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Microphone device" }),
+      micSelect,
+      grantMicBtn,
+    );
+
+    // 2c. Pre-amp Boost Slider (1.0x to 10.0x) with browser AGC bypassed
+    const preampVal = h("span", { class: "hint", text: `${(settings.voicePreampBoost || 3.0).toFixed(1)}x` });
+    const preampInput = h("input", {
+      type: "range",
+      min: "1.0",
+      max: "10.0",
+      step: "0.5",
+      value: String(settings.voicePreampBoost || 3.0),
+      oninput: () => {
+        const val = parseFloat(preampInput.value);
+        settings.voicePreampBoost = val;
+        preampVal.textContent = `${val.toFixed(1)}x`;
+        AudioCore.setPreampBoost(val);
+        void save();
+      },
+    }) as HTMLInputElement;
+
+    const preampRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Pre-amp boost" }),
+      preampInput,
+      preampVal,
+      h("span", { class: "hint", text: "(Digital gain up to 10.0x, AGC disabled)" }),
+    );
+
+    // 2d. Real-time Animated VU Meter Bar
+    const vuBar = h("div", { class: "vu-meter-bar" });
+    const vuBadge = h("span", { class: "vu-meter-badge", text: "0%" });
+    const vuContainer = h("div", { class: "vu-meter-container" },
+      h("span", { style: "font-size:11.5px;color:var(--dim)", text: "Mic Level" }),
+      h("div", { class: "vu-meter-track" }, vuBar),
+      vuBadge,
+    );
+
+    const vuRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Live test mic" }),
+      vuContainer,
+    );
+
+    AudioCore.onVolumeLevel = (lvl: number) => {
+      const pct = Math.round(lvl * 100);
+      vuBar.style.width = `${pct}%`;
+      vuBadge.textContent = `${pct}%`;
+    };
+
+    // Ensure audio core is active for live VU feedback
+    void AudioCore.start(settings.voiceMicrophoneDevice);
+    AudioCore.setPreampBoost(settings.voicePreampBoost || 3.0);
+
+    // 3. TTS enable toggle
+    const ttsRow = h("div", { class: "row", style: "justify-content:space-between" },
+      h("strong", { style: "display:flex;align-items:center;gap:6px" },
+        statusDot(settings.voiceTtsEnabled),
+        h("span", { text: "Neural Companion TTS" }),
+      ),
+      toggle(settings.voiceTtsEnabled, (v) => {
+        settings.voiceTtsEnabled = v;
+        void save();
+        void render();
+      }),
+    );
+
+    // 4. Voice selector
+    const voiceSelect = h("select", {}) as HTMLSelectElement;
+    voiceSelect.append(h("option", { value: "default", text: "Default (Microsoft Zira / Neural Companion)" }));
+    try {
+      const installed = await Bridge.voiceListVoices();
+      if (installed && installed.length > 0) {
+        clear(voiceSelect);
+        for (const v of installed) {
+          const cult = v.culture || (v as unknown as { language?: string }).language || "Local";
+          voiceSelect.append(h("option", { value: v.name, text: `${v.name} (${cult})` }));
+        }
+      }
+    } catch {
+      // fallback to default
+    }
+    voiceSelect.value = settings.voiceTtsVoice || "default";
+    voiceSelect.addEventListener("change", () => {
+      settings.voiceTtsVoice = voiceSelect.value;
+      void save();
+    });
+
+    const voiceRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Companion voice" }),
+      voiceSelect,
+    );
+
+    // 5. Rate and Pitch sliders
+    const rateVal = h("span", { class: "hint", text: `${settings.voiceTtsRate.toFixed(1)}x` });
+    const rateInput = h("input", {
+      type: "range",
+      min: "0.5",
+      max: "2.0",
+      step: "0.1",
+      value: String(settings.voiceTtsRate),
+      oninput: () => {
+        const val = parseFloat(rateInput.value);
+        settings.voiceTtsRate = val;
+        rateVal.textContent = `${val.toFixed(1)}x`;
+        void save();
+      },
+    }) as HTMLInputElement;
+
+    const rateRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Speech speed" }),
+      rateInput,
+      rateVal,
+    );
+
+    const pitchVal = h("span", { class: "hint", text: `${settings.voiceTtsPitch.toFixed(2)}x` });
+    const pitchInput = h("input", {
+      type: "range",
+      min: "0.8",
+      max: "1.5",
+      step: "0.05",
+      value: String(settings.voiceTtsPitch),
+      oninput: () => {
+        const val = parseFloat(pitchInput.value);
+        settings.voiceTtsPitch = val;
+        pitchVal.textContent = `${val.toFixed(2)}x`;
+        void save();
+      },
+    }) as HTMLInputElement;
+
+    const pitchRow = h("div", { class: "row" },
+      h("label", { style: "min-width:120px", text: "Vocal pitch" }),
+      pitchInput,
+      pitchVal,
+    );
+
+    // 6. Test Voice button
+    const testStatus = h("span", { class: "hint", text: "" });
+    const testBtn = h("button", {
+      class: "secondary",
+      text: "Test Companion Voice",
+      onclick: async () => {
+        testStatus.textContent = "Speaking…";
+        try {
+          const res = await Bridge.voiceSpeakText(
+            "Coucou! I am Mochi, your local desktop AI companion.",
+            settings.voiceTtsVoice === "default" ? undefined : settings.voiceTtsVoice,
+            settings.voiceTtsRate,
+            settings.voiceTtsPitch,
+          );
+          testStatus.textContent = res ? "Speech played" : "Synthesis failed";
+          setTimeout(() => { testStatus.textContent = ""; }, 3000);
+        } catch {
+          testStatus.textContent = "Error testing voice";
+        }
+      },
+    });
+
+    const testRow = h("div", { class: "row", style: "gap:10px;margin-top:4px" },
+      testBtn,
+      testStatus,
+    );
+
+    card.append(
+      wakeRow,
+      phraseRow,
+      micRow,
+      preampRow,
+      vuRow,
+      h("hr", { style: "border:0;border-top:1px solid var(--hairline);margin:4px 0" }),
+      ttsRow,
+      voiceRow,
+      rateRow,
+      pitchRow,
+      testRow,
+    );
+  }
+
+  void render();
+  return section;
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -425,13 +1129,9 @@ async function main() {
     settings = { ...settings, ...boot.settings };
     version = boot.version;
   }
-  const status = (await Bridge.hooksStatus()) ?? {
-    installed: false, settingsPath: "", hookPath: "", hookReady: false,
-  };
-
-  const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
 
   const keys = [
+    "anthropic-api-key", "gemini-api-key", "openai-api-key",
     "stripe-api-key", "github-token", "vercel-token",
     "n8n-url", "n8n-api-key", "resend-api-key", "notion-api-key", "calcom-api-key",
   ];
@@ -440,9 +1140,11 @@ async function main() {
 
   clear(root);
   root.append(
-    h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
-    claudeSection(status),
-    apiSection(hasKey),
+    h("h1", {}, h("span", { text: "Coucou Settings" }), h("span", { class: "version", text: version })),
+    agentsSection(),
+    mobileSyncSection(),
+    voiceSettingsSection(),
+    aiProvidersSection(present),
     integrationsSection(present),
     generalSection(),
     h("div", {
@@ -453,6 +1155,10 @@ async function main() {
 
   void onEvent<Settings>("settings-changed", (s) => {
     settings = { ...settings, ...s };
+  });
+
+  window.addEventListener("beforeunload", () => {
+    AudioCore.stop();
   });
 }
 

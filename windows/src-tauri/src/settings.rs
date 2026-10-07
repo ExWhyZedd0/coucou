@@ -20,10 +20,98 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default = "default_chat_provider")]
+    pub chat_provider: String,
+    #[serde(default = "default_gemini_model")]
+    pub gemini_model: String,
+    #[serde(default = "default_openai_model")]
+    pub openai_model: String,
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+    #[serde(default = "default_lmstudio_model")]
+    pub lmstudio_model: String,
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    #[serde(default = "default_lmstudio_url")]
+    pub lmstudio_url: String,
+    #[serde(default = "default_outfit")]
+    pub mochi_outfit: String,
+    #[serde(default)]
+    pub mochi_on_desktop: bool,
+    #[serde(default = "default_true")]
+    pub global_shortcuts_enabled: bool,
+    #[serde(default = "default_true")]
+    pub voice_wake_word_enabled: bool,
+    #[serde(default = "default_wake_phrase")]
+    pub voice_wake_phrase: String,
+    #[serde(default = "default_true")]
+    pub voice_tts_enabled: bool,
+    #[serde(default = "default_tts_voice")]
+    pub voice_tts_voice: String,
+    #[serde(default = "default_voice_rate")]
+    pub voice_tts_rate: f64,
+    #[serde(default = "default_voice_pitch")]
+    pub voice_tts_pitch: f64,
+    #[serde(default)]
+    pub voice_push_to_talk: bool,
+    #[serde(default = "default_mic_device")]
+    pub voice_microphone_device: String,
+    #[serde(default = "default_preamp_boost")]
+    pub voice_preamp_boost: f64,
+    #[serde(default = "default_main_pill")]
+    pub main_pill: String,
 }
 
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
+}
+fn default_chat_provider() -> String {
+    "anthropic".to_string()
+}
+fn default_gemini_model() -> String {
+    "gemini-2.0-flash".to_string()
+}
+fn default_openai_model() -> String {
+    "gpt-4o".to_string()
+}
+fn default_ollama_model() -> String {
+    "llama3.2".to_string()
+}
+fn default_lmstudio_model() -> String {
+    "local-model".to_string()
+}
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+fn default_lmstudio_url() -> String {
+    "http://localhost:1234".to_string()
+}
+fn default_outfit() -> String {
+    "auto".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_wake_phrase() -> String {
+    "both".to_string()
+}
+fn default_tts_voice() -> String {
+    "default".to_string()
+}
+fn default_voice_rate() -> f64 {
+    1.0
+}
+fn default_voice_pitch() -> f64 {
+    1.1
+}
+fn default_mic_device() -> String {
+    "default".to_string()
+}
+fn default_preamp_boost() -> f64 {
+    3.0
+}
+fn default_main_pill() -> String {
+    "integration_claude".to_string()
 }
 
 impl Default for Settings {
@@ -43,6 +131,26 @@ impl Default for Settings {
             autostart: false,
             hooks_installed: false,
             model: default_model(),
+            chat_provider: default_chat_provider(),
+            gemini_model: default_gemini_model(),
+            openai_model: default_openai_model(),
+            ollama_model: default_ollama_model(),
+            lmstudio_model: default_lmstudio_model(),
+            ollama_url: default_ollama_url(),
+            lmstudio_url: default_lmstudio_url(),
+            mochi_outfit: default_outfit(),
+            mochi_on_desktop: false,
+            global_shortcuts_enabled: true,
+            voice_wake_word_enabled: true,
+            voice_wake_phrase: default_wake_phrase(),
+            voice_tts_enabled: true,
+            voice_tts_voice: default_tts_voice(),
+            voice_tts_rate: default_voice_rate(),
+            voice_tts_pitch: default_voice_pitch(),
+            voice_push_to_talk: false,
+            voice_microphone_device: default_mic_device(),
+            voice_preamp_boost: default_preamp_boost(),
+            main_pill: default_main_pill(),
         }
     }
 }

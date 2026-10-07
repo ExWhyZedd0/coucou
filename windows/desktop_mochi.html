@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mochi</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent !important;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #mochi-container {
+        width: 140px;
+        height: 140px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: grab;
+      }
+      #mochi-container:active {
+        cursor: grabbing;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="mochi-container"></div>
+    <script type="module" src="/src/desktop_mochi/main.ts"></script>
+  </body>
+</html>

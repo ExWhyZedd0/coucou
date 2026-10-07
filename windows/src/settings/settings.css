@@ -265,3 +265,48 @@ select option {
   background: rgba(245, 165, 36, 0.13);
   color: #fbc06a;
 }
+
+/* Real-time Visual VU Meter Bar */
+.vu-meter-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 6px 12px;
+  flex: 1 1 220px;
+  max-width: 380px;
+}
+
+.vu-meter-track {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.vu-meter-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #22c55e 0%, #22c55e 65%, #eab308 85%, #ef4444 100%);
+  border-radius: 4px;
+  transition: width 0.05s ease-out;
+}
+
+.vu-meter-badge {
+  font: 500 11px var(--mono);
+  color: var(--dim);
+  min-width: 36px;
+  text-align: right;
+}
+
+.section-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink);
+  opacity: 0.85;
+}

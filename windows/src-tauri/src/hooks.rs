@@ -57,7 +57,17 @@ pub struct HookPreview {
 }
 
 pub fn settings_path() -> PathBuf {
-    platform::home_dir().join(".claude").join("settings.json")
+    settings_path_for("claude")
+}
+
+pub fn settings_path_for(agent: &str) -> PathBuf {
+    let home = platform::home_dir();
+    match agent.to_lowercase().as_str() {
+        "gemini" => home.join(".gemini").join("settings.json"),
+        "antigravity" | "agy" => home.join(".gemini").join("config").join("hooks.json"),
+        "codex" => home.join(".codex").join("hooks.json"),
+        _ => home.join(".claude").join("settings.json"),
+    }
 }
 
 /// Reads `~/.claude/settings.json`.
@@ -125,18 +135,22 @@ fn sh_quote(s: &str) -> String {
 }
 
 fn entry_is_ours(entry: &Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(Value::as_str)
-                    .map(|c| c.contains(MARKER))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    if let Some(hooks) = entry.get("hooks").and_then(Value::as_array) {
+        if hooks.iter().any(|h| {
+            h.get("command")
+                .and_then(Value::as_str)
+                .map(|c| c.contains(MARKER))
+                .unwrap_or(false)
+        }) {
+            return true;
+        }
+    }
+    if let Some(cmd) = entry.get("command").and_then(Value::as_str) {
+        if cmd.contains(MARKER) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Settings with Coucou's hooks added; everything else is left untouched.
@@ -212,11 +226,6 @@ fn stamp() -> String {
     )
 }
 
-fn backup_path() -> PathBuf {
-    let p = settings_path();
-    p.with_file_name(format!("settings.json.bak-{}", stamp()))
-}
-
 /// Identifies the exact bytes a preview was computed from. FNV-1a is plenty:
 /// the question is only "is this still the file I showed the user?".
 fn fingerprint(bytes: &[u8]) -> String {
@@ -228,85 +237,100 @@ fn fingerprint(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-fn current_fingerprint() -> String {
-    match std::fs::read(settings_path()) {
-        Ok(bytes) => fingerprint(&bytes),
-        Err(_) => fingerprint(b""),
-    }
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn status() -> HookStatus {
-    let current = read_settings_lossy();
-    let installed = current
-        .get("hooks")
-        .and_then(Value::as_object)
-        .map(|hooks| {
-            hooks
-                .values()
-                .filter_map(Value::as_array)
-                .flatten()
-                .any(entry_is_ours)
-        })
-        .unwrap_or(false);
+    status_for("claude")
+}
+
+pub fn status_for(agent: &str) -> HookStatus {
+    let path = settings_path_for(agent);
+    let installed = match agent.to_lowercase().as_str() {
+        "gemini" => {
+            read_settings_for("gemini").ok()
+                .and_then(|v| v.get("hooks").and_then(Value::as_object).cloned())
+                .map(|h| h.values().filter_map(Value::as_array).flatten().any(entry_is_ours))
+                .unwrap_or(false)
+        }
+        "antigravity" | "agy" => {
+            read_settings_for("antigravity").ok()
+                .and_then(|v| v.get("coucou").cloned())
+                .is_some()
+        }
+        "codex" => {
+            read_settings_for("codex").ok()
+                .and_then(|v| v.get("hooks").and_then(Value::as_object).cloned())
+                .map(|h| h.values().filter_map(Value::as_array).flatten().any(entry_is_ours))
+                .unwrap_or(false)
+        }
+        _ => {
+            let current = read_settings_lossy();
+            current
+                .get("hooks")
+                .and_then(Value::as_object)
+                .map(|hooks| {
+                    hooks
+                        .values()
+                        .filter_map(Value::as_array)
+                        .flatten()
+                        .any(entry_is_ours)
+                })
+                .unwrap_or(false)
+        }
+    };
     let hook_path = settings::hook_exe_path();
     HookStatus {
         installed,
-        settings_path: settings_path().to_string_lossy().to_string(),
+        settings_path: path.to_string_lossy().to_string(),
         hook_ready: hook_path.exists(),
         hook_path: hook_path.to_string_lossy().to_string(),
     }
 }
 
 pub fn preview(install: bool) -> Result<HookPreview, String> {
-    let current = read_settings()?;
-    let next = if install { merged(&current) } else { without_ours(&current) };
+    preview_for("claude", install)
+}
+
+pub fn preview_for(agent: &str, install: bool) -> Result<HookPreview, String> {
+    let current = read_settings_for(agent)?;
+    let next = if install { merged_for(agent, &current) } else { without_ours_for(agent, &current) };
     Ok(HookPreview {
         diff: unified_diff(&pretty(&current), &pretty(&next)),
-        backup: backup_path().to_string_lossy().to_string(),
-        settings_path: settings_path().to_string_lossy().to_string(),
-        fingerprint: current_fingerprint(),
+        backup: backup_path_for(agent).to_string_lossy().to_string(),
+        settings_path: settings_path_for(agent).to_string_lossy().to_string(),
+        fingerprint: current_fingerprint_for(agent),
     })
 }
 
-/// Writes the merged (or cleaned) settings after taking a dated backup.
-///
-/// `fingerprint` is the one the preview was computed from. If the file changed
-/// in between — another tool, another window, the user's own editor — we stop
-/// and make them look at a fresh diff, because the only thing worse than not
-/// installing the hooks is silently reverting somebody else's edit.
 pub fn write(install: bool, fingerprint: &str) -> Result<String, String> {
-    let path = settings_path();
+    write_for("claude", install, fingerprint)
+}
+
+pub fn write_for(agent: &str, install: bool, fingerprint: &str) -> Result<String, String> {
+    let path = settings_path_for(agent);
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
-    // Read before the backup: an unreadable file must abort before we touch
-    // anything at all.
-    let current = read_settings()?;
-    if current_fingerprint() != fingerprint {
+    let current = read_settings_for(agent)?;
+    if current_fingerprint_for(agent) != fingerprint {
         return Err(format!(
             "{} changed since the preview. Nothing was written — review the new diff.",
             path.display()
         ));
     }
 
-    let backup = backup_path();
+    let backup = backup_path_for(agent);
     if path.exists() {
         std::fs::copy(&path, &backup).map_err(|e| format!("backup failed: {e}"))?;
     }
 
-    let next = if install { merged(&current) } else { without_ours(&current) };
+    let next = if install { merged_for(agent, &current) } else { without_ours_for(agent, &current) };
     let mut text = pretty(&next);
     text.push('\n');
 
-    // A dotfiles setup often makes settings.json a symlink: write to the file it
-    // points at, so the link survives the rename below.
     #[cfg(unix)]
     let path = std::fs::canonicalize(&path).unwrap_or(path);
 
-    // Write beside the target and rename over it: a crash or a full disk leaves
-    // the original settings.json intact rather than half a file.
     let temp = path.with_extension(format!("json.coucou-{}", std::process::id()));
     if let Err(err) = write_like(&temp, &path, text.as_bytes()) {
         let _ = std::fs::remove_file(&temp);
@@ -317,6 +341,128 @@ pub fn write(install: bool, fingerprint: &str) -> Result<String, String> {
         return Err(format!("write failed: {err}"));
     }
     Ok(backup.to_string_lossy().to_string())
+}
+
+fn read_settings_for(agent: &str) -> Result<Value, String> {
+    let path = settings_path_for(agent);
+    match std::fs::read(&path) {
+        Ok(bytes) => parse_settings(&bytes, &path.display().to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(err) => Err(format!("Can't read {}: {err}", path.display())),
+    }
+}
+
+fn backup_path_for(agent: &str) -> PathBuf {
+    let p = settings_path_for(agent);
+    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("settings.json");
+    p.with_file_name(format!("{fname}.bak-{}", stamp()))
+}
+
+fn current_fingerprint_for(agent: &str) -> String {
+    match std::fs::read(settings_path_for(agent)) {
+        Ok(bytes) => fingerprint(&bytes),
+        Err(_) => fingerprint(b""),
+    }
+}
+
+fn merged_for(agent: &str, existing: &Value) -> Value {
+    let exe = settings::hook_exe_path().to_string_lossy().replace('\\', "/");
+    match agent.to_lowercase().as_str() {
+        "gemini" => {
+            let mut root = existing.as_object().cloned().unwrap_or_default();
+            let mut hooks = root.get("hooks").and_then(Value::as_object).cloned().unwrap_or_else(Map::new);
+            let events = [
+                ("SessionStart", "SessionStart", 10000),
+                ("SessionEnd", "SessionEnd", 10000),
+                ("BeforeTool", "PreToolUse", 5000),
+                ("AfterTool", "PostToolUse", 5000),
+                ("BeforeAgent", "UserPromptSubmit", 5000),
+                ("AfterAgent", "Stop", 5000),
+            ];
+            for (g_ev, n_ev, to) in events {
+                let mut list = hooks.get(g_ev).and_then(Value::as_array).cloned().unwrap_or_default();
+                list.retain(|entry| !entry_is_ours(entry));
+                let cmd = format!("\"{}\" --agent gemini {}", exe, n_ev);
+                list.push(json!({
+                    "matcher": "*",
+                    "hooks": [{ "type": "command", "command": cmd, "timeout": to }]
+                }));
+                hooks.insert(g_ev.to_string(), Value::Array(list));
+            }
+            root.insert("hooks".into(), Value::Object(hooks));
+            Value::Object(root)
+        }
+        "antigravity" | "agy" => {
+            let mut root = existing.as_object().cloned().unwrap_or_default();
+            let mut coucou = Map::new();
+            for ev in ["PreToolUse", "PostToolUse"] {
+                let cmd = format!("\"{}\" --agent antigravity {}", exe, ev);
+                coucou.insert(ev.to_string(), json!([
+                    { "matcher": "*", "hooks": [{ "type": "command", "command": cmd, "timeout": 10 }] }
+                ]));
+            }
+            for ev in ["PreInvocation", "PostInvocation", "Stop"] {
+                let cmd = format!("\"{}\" --agent antigravity {}", exe, ev);
+                coucou.insert(ev.to_string(), json!([
+                    { "type": "command", "command": cmd, "timeout": 10 }
+                ]));
+            }
+            root.insert("coucou".into(), Value::Object(coucou));
+            Value::Object(root)
+        }
+        "codex" => {
+            let mut root = existing.as_object().cloned().unwrap_or_default();
+            let mut hooks = root.get("hooks").and_then(Value::as_object).cloned().unwrap_or_else(Map::new);
+            for ev in ["PreToolUse", "PostToolUse", "Stop"] {
+                let mut list = hooks.get(ev).and_then(Value::as_array).cloned().unwrap_or_default();
+                list.retain(|entry| !entry_is_ours(entry));
+                let cmd = format!("\"{}\" --agent codex {}", exe, ev);
+                list.push(json!({ "type": "command", "command": cmd, "timeout": 10 }));
+                hooks.insert(ev.to_string(), Value::Array(list));
+            }
+            root.insert("hooks".into(), Value::Object(hooks));
+            Value::Object(root)
+        }
+        _ => merged(existing),
+    }
+}
+
+fn without_ours_for(agent: &str, existing: &Value) -> Value {
+    match agent.to_lowercase().as_str() {
+        "gemini" | "codex" => {
+            let mut root = existing.as_object().cloned().unwrap_or_default();
+            let Some(hooks) = root.get("hooks").and_then(Value::as_object).cloned() else {
+                return Value::Object(root);
+            };
+            let mut out = Map::new();
+            for (event, value) in hooks {
+                match value.as_array() {
+                    Some(list) => {
+                        let kept: Vec<Value> =
+                            list.iter().filter(|e| !entry_is_ours(e)).cloned().collect();
+                        if !kept.is_empty() {
+                            out.insert(event, Value::Array(kept));
+                        }
+                    }
+                    None => {
+                        out.insert(event, value);
+                    }
+                }
+            }
+            if out.is_empty() {
+                root.remove("hooks");
+            } else {
+                root.insert("hooks".into(), Value::Object(out));
+            }
+            Value::Object(root)
+        }
+        "antigravity" | "agy" => {
+            let mut root = existing.as_object().cloned().unwrap_or_default();
+            root.remove("coucou");
+            Value::Object(root)
+        }
+        _ => without_ours(existing),
+    }
 }
 
 /// Writes `bytes` to `temp`, which is about to replace `original`.
@@ -671,5 +817,48 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn multi_agent_hooks_merge_and_clean_preserve_user_hooks() {
+        // Codex
+        let codex_original = json!({
+            "hooks": {
+                "PreToolUse": [{ "type": "command", "command": "custom_linter.exe", "timeout": 5 }],
+                "OtherEvent": [{ "type": "command", "command": "other.exe" }]
+            }
+        });
+        let codex_merged = merged_for("codex", &codex_original);
+        let pre_list = codex_merged["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_list.len(), 2, "Codex should have both custom linter and Coucou hook");
+        assert!(pre_list.iter().any(entry_is_ours), "entry_is_ours must detect Codex Coucou hook");
+        assert!(pre_list.iter().any(|e| e["command"] == "custom_linter.exe"));
+
+        let codex_uninstalled = without_ours_for("codex", &codex_merged);
+        let uninstalled_pre = codex_uninstalled["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(uninstalled_pre.len(), 1, "Custom linter must remain after uninstall");
+        assert_eq!(uninstalled_pre[0]["command"], "custom_linter.exe");
+
+        // Gemini
+        let gemini_original = json!({
+            "hooks": {
+                "BeforeTool": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "gemini_tool.exe" }] }]
+            }
+        });
+        let gemini_merged = merged_for("gemini", &gemini_original);
+        let before_tool = gemini_merged["hooks"]["BeforeTool"].as_array().unwrap();
+        assert_eq!(before_tool.len(), 2, "Gemini should have both user tool and Coucou hook");
+        let gemini_uninstalled = without_ours_for("gemini", &gemini_merged);
+        let uninstalled_bt = gemini_uninstalled["hooks"]["BeforeTool"].as_array().unwrap();
+        assert_eq!(uninstalled_bt.len(), 1, "User hook must remain in BeforeTool");
+
+        // Antigravity
+        let agy_original = json!({ "custom_setting": true });
+        let agy_merged = merged_for("antigravity", &agy_original);
+        assert!(agy_merged.get("coucou").is_some());
+        assert_eq!(agy_merged["custom_setting"], true);
+        let agy_uninstalled = without_ours_for("antigravity", &agy_merged);
+        assert!(agy_uninstalled.get("coucou").is_none());
+        assert_eq!(agy_uninstalled["custom_setting"], true);
     }
 }

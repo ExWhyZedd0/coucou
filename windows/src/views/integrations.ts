@@ -403,7 +403,24 @@ export function hasIntegrationData(id: string): boolean {
   }
 }
 
+function musicIntegrationCard(): HTMLElement {
+  return h(
+    "div",
+    { class: "int-card" },
+    header("#EC4899", "Now Playing", "Media"),
+    h(
+      "div",
+      { class: "int-row" },
+      h("span", { class: "int-name", text: "Windows Media (SMTC)" }),
+      h("span", { class: "int-status", text: "Universal" }),
+    ),
+  );
+}
+
 export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  if (task.id === "integration_music") {
+    return musicIntegrationCard();
+  }
   if (task.id === "integration_n8n") {
     const hasActivity = task.steps.length > 0 && (task.state === "finished" || task.state === "error");
     return hooks.detailOpen && hasActivity

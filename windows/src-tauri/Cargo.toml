@@ -19,12 +19,21 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+mdns-sd = "0.13"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 windows = { version = "0.61", features = [
+  "Foundation",
+  "Media_Control",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Authorization",

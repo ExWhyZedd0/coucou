@@ -11,6 +11,9 @@ import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
+import { buildWardrobe } from "./wardrobe";
+import { buildMusicPill } from "./music_pill";
+import type { FileDiff } from "../core/diff";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -25,6 +28,7 @@ export interface ViewActions {
   setVolume(v: number): void;
   setAutoClose(seconds: number): void;
   openSettingsWindow(): void;
+  openDiff?(diff: FileDiff): void;
   blip(): void;
 }
 
@@ -117,7 +121,10 @@ export function buildHeader(actions: ViewActions): ViewHost {
 // ── Overview ──────────────────────────────────────────────────────────────────
 
 function buildOverview(actions: ViewActions): ViewHost {
-  const ticker = new Ticker();
+  const ticker = new Ticker((diffId) => {
+    const diff = State.diffHistory.find((d) => d.id === diffId) ?? State.activeDiff;
+    if (diff && actions.openDiff) actions.openDiff(diff);
+  });
   const who = h("div", { class: "who" });
   const tickerBody = h("div", { class: "card-body" }, who, ticker.el);
   const leftBody = h("div", { class: "left-body" });
@@ -172,10 +179,16 @@ function buildOverview(actions: ViewActions): ViewHost {
         mode = null;
       }
 
-      // VS Code with a live Claude Code session keeps the ticker; every other
-      // pill shows its own card, exactly like IntegrationCardView.
+      // Agent pills (VS Code / Claude Code, Gemini CLI, Antigravity, Codex) with an active session
+      // keep the ticker; other pills show their integration cards.
+      const isAgentTask =
+        task != null &&
+        (task.id === "integration_claude" ||
+          task.id.startsWith("agent_") ||
+          task.source === "claudeCode" ||
+          task.source === "agent");
       const sessionActive =
-        task?.id === "integration_claude" && (task.state !== "idle" || task.steps.length > 0);
+        isAgentTask && (task.state !== "idle" || task.steps.length > 0);
 
       if (task && sessionActive) {
         if (mode !== "ticker") {
@@ -185,10 +198,22 @@ function buildOverview(actions: ViewActions): ViewHost {
           cardKey = "";
         }
         clear(who);
+        const toolLabel =
+          task.source === "claudeCode"
+            ? "Claude Code"
+            : task.id === "agent_gemini"
+              ? "Gemini CLI"
+              : task.id === "agent_antigravity"
+                ? "Antigravity"
+                : task.id === "agent_codex"
+                  ? "Codex"
+                  : task.source === "agent"
+                    ? task.name
+                    : "n8n";
         who.append(
           dot(task.color, 7),
           h("span", { class: "name", text: task.name }),
-          h("span", { class: "tool", text: task.source === "claudeCode" ? "Claude Code" : "n8n" }),
+          h("span", { class: "tool", text: toolLabel }),
         );
         if (task.steps.length > 1) {
           who.append(h("span", {
@@ -501,6 +526,8 @@ export function buildViews(
   map.set("upload", buildUpload());
   map.set("uploading", buildUploading());
   map.set("choose", buildChoose(actions));
+  map.set("wardrobe", buildWardrobe(() => actions.setView("overview")));
+  map.set("music", buildMusicPill());
   // Not in the Windows v1: sending a file by email, window attach + web result.
   map.set("mail", buildPlaceholder("Sending by email isn't in this version.", ""));
   map.set("searching", buildPlaceholder("Claude is searching…", ""));

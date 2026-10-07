@@ -2,6 +2,8 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
+import type { FileDiff } from "./diff";
+import { resolveOutfit, type Outfit } from "../mochi/outfits";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
@@ -59,6 +61,11 @@ const task = (
 /** AgentTask.integrationAgents — same ids, names and colours as macOS. */
 export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_claude", "VS Code", "#F5F6F8", "claudeCode"),
+  task("agent_cursor", "Cursor", "#38BDF8", "agent"),
+  task("agent_gemini", "Gemini CLI", "#8AB4F8", "agent"),
+  task("agent_antigravity", "Antigravity", "#9333EA", "agent"),
+  task("agent_codex", "Codex", "#2DD4BF", "agent"),
+  task("integration_music", "Now Playing", "#EC4899", "agent"),
   task("integration_resend", "Resend", "#22C55E", "n8n"),
   task("integration_n8n", "n8n", "#F29B38", "n8n"),
   task("integration_vercel", "Vercel", "#7C5CFF", "n8n"),
@@ -69,6 +76,7 @@ export const INTEGRATION_AGENTS: AgentTask[] = [
 ];
 
 export const TOGGLEABLE_INTEGRATION_IDS = [
+  "agent_cursor", "agent_gemini", "agent_antigravity", "agent_codex", "integration_music",
   "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
   "integration_notion", "integration_calcom", "integration_stripe",
 ];
@@ -90,8 +98,28 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
-  /** Claude model used by the chat. */
+  /** AI model used by the chat. */
   model: string;
+  chatProvider: string;
+  geminiModel: string;
+  openaiModel: string;
+  ollamaModel: string;
+  lmstudioModel: string;
+  ollamaUrl: string;
+  lmstudioUrl: string;
+  mochiOutfit: string;
+  mochiOnDesktop: boolean;
+  globalShortcutsEnabled: boolean;
+  voiceWakeWordEnabled: boolean;
+  voiceWakePhrase: string;
+  voiceTtsEnabled: boolean;
+  voiceTtsVoice: string;
+  voiceTtsRate: number;
+  voiceTtsPitch: number;
+  voicePushToTalk: boolean;
+  voiceMicrophoneDevice: string;
+  voicePreampBoost: number;
+  mainPill: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -106,6 +134,26 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  chatProvider: "anthropic",
+  geminiModel: "gemini-2.0-flash",
+  openaiModel: "gpt-4o",
+  ollamaModel: "llama3.2",
+  lmstudioModel: "local-model",
+  ollamaUrl: "http://localhost:11434",
+  lmstudioUrl: "http://localhost:1234",
+  mochiOutfit: "auto",
+  mochiOnDesktop: false,
+  globalShortcutsEnabled: true,
+  voiceWakeWordEnabled: true,
+  voiceWakePhrase: "both",
+  voiceTtsEnabled: true,
+  voiceTtsVoice: "default",
+  voiceTtsRate: 1.0,
+  voiceTtsPitch: 1.1,
+  voicePushToTalk: false,
+  voiceMicrophoneDevice: "default",
+  voicePreampBoost: 3.0,
+  mainPill: "integration_claude",
 };
 
 type Listener = () => void;
@@ -137,6 +185,11 @@ class AppState {
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
   pendingApproval: ApprovalInfo | null = null;
+  activeDiff: FileDiff | null = null;
+  diffHistory: FileDiff[] = [];
+
+  isVoiceListening = false;
+  isVoiceSpeaking = false;
 
   integrations: Record<string, IntegrationInfo> = {};
 
@@ -162,6 +215,10 @@ class AppState {
 
   get effectiveState(): BotStateName {
     return this.stateOverride ?? this.focusTask?.state ?? "idle";
+  }
+
+  get resolvedOutfit(): Outfit {
+    return resolveOutfit((this.settings.mochiOutfit as Outfit) || "auto");
   }
 
   get otherTasks(): AgentTask[] {
@@ -192,6 +249,16 @@ class AppState {
     this.notify();
   }
 
+  appendSessionDiff(diff: FileDiff): number {
+    const id = this.diffHistory.length + 1;
+    diff.id = id;
+    this.diffHistory.push(diff);
+    if (this.diffHistory.length > 50) this.diffHistory.shift();
+    this.activeDiff = diff;
+    this.notify();
+    return id;
+  }
+
   setPillBadge(id: string, badge: PillBadge | null) {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
@@ -199,32 +266,32 @@ class AppState {
     this.notify();
   }
 
-  /** loadIntegrationTasks() — VS Code always on, the rest opt-in (max 4). */
+  /** loadIntegrationTasks() — Main pinned pill always on, the rest opt-in (max 4). */
   loadIntegrationTasks() {
+    const mainPillId = this.settings.mainPill || "integration_claude";
     for (const proto of INTEGRATION_AGENTS) {
       const shouldLoad =
-        proto.id === "integration_claude" || this.settings.activeIntegrations.includes(proto.id);
+        proto.id === mainPillId || this.settings.activeIntegrations.includes(proto.id);
       const idx = this.tasks.findIndex((t) => t.id === proto.id);
       if (shouldLoad && idx < 0) this.tasks.push({ ...proto, steps: [] });
       if (!shouldLoad && idx >= 0) this.tasks.splice(idx, 1);
     }
-    // Order: integration_claude first, then agent_* pills (visible in slice(0,4)),
+    // Order: mainPillId first, then agent_* pills (visible in slice(0,4)),
     // then other integrations in declaration order.
     const order = INTEGRATION_AGENTS.map((t) => t.id);
     this.tasks.sort((a, b) => {
-      const isAgentA = a.id.startsWith("agent_");
-      const isAgentB = b.id.startsWith("agent_");
-      // integration_claude always first
-      if (a.id === "integration_claude") return -1;
-      if (b.id === "integration_claude") return 1;
-      // agent_* before other integrations; preserve insertion order among themselves
+      if (a.id === mainPillId) return -1;
+      if (b.id === mainPillId) return 1;
+      const isAgentA = a.id.startsWith("agent_") || a.id === "integration_claude";
+      const isAgentB = b.id.startsWith("agent_") || b.id === "integration_claude";
       if (isAgentA && !isAgentB) return -1;
       if (isAgentB && !isAgentA) return 1;
       if (isAgentA && isAgentB) return 0;
-      // both known integrations → declaration order
       return order.indexOf(a.id) - order.indexOf(b.id);
     });
-    if (!this.focusId) this.focusId = "integration_claude";
+    if (!this.focusId || !this.tasks.some((t) => t.id === this.focusId)) {
+      this.focusId = mainPillId;
+    }
     this.notify();
   }
 

@@ -7,6 +7,7 @@
 import { Ease, lerp, type EaseFn } from "../core/anim";
 import { Sound } from "../core/sound";
 import type { BotEmoteName, BotStateName } from "../core/layout";
+import { drawAttachedOutfit, type Outfit, type SkeletalAttachmentContext } from "./outfits";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -100,6 +101,7 @@ export const BOT_STATES: Record<BotStateName, BotStateCfg> = {
   ratelimit: { ...base, color: C.ratelimit, tint: 0.72, eye: "tired", badge: { kind: "dot", color: C.ratelimit }, sweat: true },
   sleeping: { ...base, color: C.sleeping, tint: 0.32, eye: "closed", badge: null, breathes: true, zz: true },
   dizzy: { ...base, color: C.dizzy, tint: 0.7, eye: "spiral", badge: null },
+  dance: { ...base, color: C.idle, tint: 0, eye: "happy", badge: null },
 };
 
 /** State → sound, as in BotStateCfg.sound. */
@@ -206,6 +208,17 @@ export class BotEngine {
   lookX = 0;
   lookY = 0;
 
+  outfit: Outfit = "none";
+  outfitPresence = 0;
+  isDancing = false;
+  dancingLevel = 0;
+
+  // Voice & mouth visemes
+  jawDrop = 0;
+  mouthShape: "neutral" | "smile" | "open" | "o" | "wide" = "neutral";
+  smileAmount = 0;
+  isSpeaking = false;
+
   lastTime = now();
   private t0 = now() - Math.random() * 5;
   private nextBlink = now() + 1.5 + Math.random() * 2;
@@ -221,6 +234,115 @@ export class BotEngine {
   onDizzy: (() => void) | null = null;
 
   // ── Public API ──────────────────────────────────────────────────────────────
+
+  setOutfit(outfit: Outfit, animated = true) {
+    this.outfit = outfit;
+    if (!animated) {
+      this.outfitPresence = outfit === "none" || outfit === "auto" ? 0 : 1;
+    }
+  }
+
+  setDancing(dancing: boolean) {
+    this.isDancing = dancing;
+  }
+
+  setViseme(
+    jawDrop: number,
+    mouthShape: "neutral" | "smile" | "open" | "o" | "wide" = "neutral",
+    smileAmount = 0
+  ) {
+    this.jawDrop = Math.max(0, Math.min(1, jawDrop));
+    this.mouthShape = mouthShape;
+    this.smileAmount = Math.max(0, Math.min(1, smileAmount));
+  }
+
+  setSpeaking(speaking: boolean) {
+    this.isSpeaking = speaking;
+    if (!speaking) {
+      this.jawDrop = 0;
+      this.mouthShape = "neutral";
+      this.smileAmount = 0;
+    }
+  }
+
+  getSkeletalContext(W: number, H: number): SkeletalAttachmentContext {
+    const R = W * 0.3;
+    const rx = R * 1.14;
+    const ry = R * 0.88;
+    const cx = W / 2 + this.ox * R;
+    const cy = H / 2 + this.particleOverhang / 2 + this.oy * R + R * 0.06;
+
+    // Head apex point on squircle boundary, deformed by yaw, pitch, and roll
+    const apexX = Math.sin(this.yaw) * rx * 0.32 - Math.sin(this.roll) * rx * 0.16;
+    const apexY = -ry + Math.sin(this.pitch) * ry * 0.22;
+    const normalAngle = this.yaw * 0.22 + this.pitch * 0.14 + this.roll;
+
+    // Eye 3D sphere projection coordinates
+    const leftEyeYaw = -1 * EYE_SP + this.yaw;
+    let leftEyePitch = EYE_P + this.pitch + this.roll;
+    leftEyePitch = (((leftEyePitch + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    const leftCp = Math.cos(leftEyePitch);
+    const leftVisible = Math.cos(leftEyeYaw) * leftCp > 0.04;
+    const leftEx = Math.sin(leftEyeYaw) * leftCp * rx;
+    const leftEy = -Math.sin(leftEyePitch) * ry + (this.morph > 0 ? ry * 0.14 * this.morph : 0);
+
+    const rightEyeYaw = 1 * EYE_SP + this.yaw;
+    let rightEyePitch = EYE_P + this.pitch + this.roll;
+    rightEyePitch = (((rightEyePitch + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    const rightCp = Math.cos(rightEyePitch);
+    const rightVisible = Math.cos(rightEyeYaw) * rightCp > 0.04;
+    const rightEx = Math.sin(rightEyeYaw) * rightCp * rx;
+    const rightEy = -Math.sin(rightEyePitch) * ry + (this.morph > 0 ? ry * 0.14 * this.morph : 0);
+
+    // Neck anchor on bottom curvature of squircle
+    const neckX = -Math.sin(this.yaw) * rx * 0.18;
+    const neckY = ry * 0.65 - Math.sin(this.pitch) * ry * 0.12;
+
+    return {
+      cx,
+      cy,
+      R,
+      rx,
+      ry,
+      sx: this.sx,
+      sy: this.sy,
+      yaw: this.yaw,
+      pitch: this.pitch,
+      roll: this.roll,
+      tilt: this.tilt,
+      morph: this.morph,
+      presence: this.outfitPresence,
+      apex: {
+        x: apexX,
+        y: apexY,
+        normalAngle,
+      },
+      eyeLeft: {
+        x: leftEx,
+        y: leftEy,
+        scaleX: lerp(Math.max(0.18, Math.cos(leftEyeYaw)), 1, this.morph * 0.7),
+        scaleY: lerp(Math.max(0.18, leftCp), 1, this.morph * 0.7),
+        visible: leftVisible,
+      },
+      eyeRight: {
+        x: rightEx,
+        y: rightEy,
+        scaleX: lerp(Math.max(0.18, Math.cos(rightEyeYaw)), 1, this.morph * 0.7),
+        scaleY: lerp(Math.max(0.18, rightCp), 1, this.morph * 0.7),
+        visible: rightVisible,
+      },
+      neck: {
+        x: neckX,
+        y: neckY,
+        width: rx * 1.5,
+      },
+      viseme: {
+        mouthShape: this.mouthShape,
+        jawDrop: this.jawDrop,
+        smileAmount: this.smileAmount,
+      },
+    };
+  }
 
   setState(next: BotStateName, force = false) {
     if (this.state === next && !force) return;
@@ -468,7 +590,10 @@ export class BotEngine {
       this.slotH > 0.001 || Math.abs(this.slotHVel) > 0.001 ||
       Math.abs(this.col[0] - this.colT[0]) > 0.003 ||
       Math.abs(this.col[1] - this.colT[1]) > 0.003 ||
-      Math.abs(this.col[2] - this.colT[2]) > 0.003
+      Math.abs(this.col[2] - this.colT[2]) > 0.003 ||
+      this.dancingLevel > 0.001 ||
+      this.jawDrop > 0.005 ||
+      this.isSpeaking
     );
   }
 
@@ -504,6 +629,12 @@ export class BotEngine {
     }
 
     const t = n - this.t0;
+
+    const tgDance = this.isDancing ? 1 : 0;
+    this.dancingLevel = lerp(this.dancingLevel, tgDance, Math.min(1, dt * 8));
+    const tgOutfit = this.outfit !== "none" && this.outfit !== "auto" ? 1 : 0;
+    this.outfitPresence = lerp(this.outfitPresence, tgOutfit, Math.min(1, dt * 10));
+
     let ty = this.lookX * 0.62;
     let tp = this.lookY * 0.5;
 
@@ -597,6 +728,10 @@ export class BotEngine {
     this.slotHVel += acc * dt;
     this.slotH = Math.max(0, this.slotH + this.slotHVel * dt);
 
+    if (!this.isSpeaking && this.jawDrop > 0.001) {
+      this.jawDrop = Math.max(0, this.jawDrop - dt * 6);
+    }
+
     this.lastTime = n;
   }
 
@@ -634,7 +769,20 @@ export class BotEngine {
     }
   }
 
-  // ── Draw ────────────────────────────────────────────────────────────────────
+  applyDance(x: CanvasRenderingContext2D, W: number, H: number) {
+    if (this.dancingLevel <= 0.001) return;
+    const R = W * 0.3;
+    const px = W / 2 + this.ox * R;
+    const py = H / 2 + this.particleOverhang / 2 + this.oy * R + R * 0.06 + R * 0.88;
+    const beat = (performance.now() / 1000) * 112 / 60;
+    const hop = Math.abs(Math.sin(Math.PI * beat));
+    const land = Math.pow(1 - hop, 6);
+    const l = this.dancingLevel;
+    x.translate(px + 0.08 * R * Math.sin(Math.PI * beat) * l, py - 0.20 * R * hop * l);
+    x.rotate(0.10 * Math.sin(Math.PI * beat) * l);
+    x.scale(1 + 0.045 * land * l, 1 - 0.06 * land * l);
+    x.translate(-px, -py);
+  }
 
   /**
    * Draws hands, body, blush, eyes, mouth, badge and particles into a canvas of
@@ -646,6 +794,11 @@ export class BotEngine {
     const ry = R * 0.88;
     const cx = W / 2 + this.ox * R;
     const cy = H / 2 + this.particleOverhang / 2 + this.oy * R + R * 0.06;
+
+    x.save();
+    if (this.dancingLevel > 0.001) {
+      this.applyDance(x, W, H);
+    }
 
     this.drawHandsBehind(x, R, rx, ry, cx, cy);
 
@@ -672,7 +825,16 @@ export class BotEngine {
     }
 
     this.drawEyes(x, body, R, rx, ry);
-    if (this.morph > 0.05) this.drawMouth(x, body, R);
+    if (this.morph > 0.05) {
+      this.drawMouth(x, body, R);
+    } else if (this.jawDrop > 0.02 || this.isSpeaking) {
+      this.drawVisemeMouth(x, body, R, rx, ry);
+    }
+
+    if (this.outfit !== "none" && this.outfit !== "auto" && !this.isMini && this.outfitPresence > 0.01) {
+      const skel = this.getSkeletalContext(W, H);
+      drawAttachedOutfit(x, this.outfit, skel);
+    }
 
     x.restore();
 
@@ -680,6 +842,8 @@ export class BotEngine {
       this.drawBadge(x, this.badge, R, cx, cy);
     }
     this.drawParticles(x, R, cx, cy);
+
+    x.restore();
   }
 
   private bodyPath(rx: number, ry: number, R: number): Path2D {
@@ -931,6 +1095,80 @@ export class BotEngine {
     x.restore();
   }
 
+  /** Live speech viseme mouth: responds dynamically to TTS audio amplitudes and visemes. */
+  private drawVisemeMouth(
+    x: CanvasRenderingContext2D,
+    body: Path2D,
+    R: number,
+    rx: number,
+    ry: number
+  ) {
+    const jd = Math.min(1, Math.max(0, this.jawDrop));
+    const smile = Math.min(1, Math.max(0, this.smileAmount));
+    const shape = this.mouthShape;
+
+    // Mouth position between eyes and chin
+    const mx = Math.sin(this.yaw) * rx * 0.4;
+    const my = ry * 0.16 + Math.sin(this.pitch) * ry * 0.18;
+
+    x.save();
+    x.clip(body);
+    x.translate(mx, my);
+
+    const baseW = R * 0.22;
+    const baseH = R * 0.26 * jd;
+
+    const ink = this.isMini ? MINI_INK : INK;
+    x.fillStyle = ink;
+    x.strokeStyle = ink;
+    x.lineWidth = R * 0.04;
+    x.lineCap = "round";
+    x.lineJoin = "round";
+
+    if (jd <= 0.12 && shape !== "open" && shape !== "o") {
+      // Gentle cute smiling line (∩ or ◡)
+      x.beginPath();
+      const smileLift = smile * R * 0.04;
+      x.moveTo(-baseW * 0.5, -smileLift);
+      x.quadraticCurveTo(0, R * 0.05 + smileLift, baseW * 0.5, -smileLift);
+      x.stroke();
+    } else if (shape === "o") {
+      // Cute round surprised / "o" mouth
+      const oR = Math.max(R * 0.05, baseW * 0.45 * (0.6 + jd * 0.4));
+      x.beginPath();
+      x.ellipse(0, 0, oR * 0.85, oR * (0.8 + jd * 0.4), 0, 0, Math.PI * 2);
+      x.fill();
+      // Inside mouth dark shading
+      x.fillStyle = "#FF6B8B";
+      x.beginPath();
+      x.ellipse(0, oR * 0.35, oR * 0.5, oR * 0.4, 0, 0, Math.PI);
+      x.fill();
+    } else {
+      // Open expressive speaking mouth with pink tongue
+      const mw = baseW * (0.8 + jd * 0.4 + smile * 0.2);
+      const mh = Math.max(R * 0.06, baseH);
+
+      x.beginPath();
+      x.moveTo(-mw * 0.5, -mh * 0.2);
+      x.quadraticCurveTo(0, -mh * 0.35 - smile * R * 0.04, mw * 0.5, -mh * 0.2);
+      x.quadraticCurveTo(mw * 0.5, mh * 0.7, 0, mh * 0.8);
+      x.quadraticCurveTo(-mw * 0.5, mh * 0.7, -mw * 0.5, -mh * 0.2);
+      x.closePath();
+      x.fill();
+
+      // Cute pink tongue
+      x.save();
+      x.clip();
+      x.fillStyle = "#FF7A90";
+      x.beginPath();
+      x.ellipse(0, mh * 0.5, mw * 0.4, mh * 0.45, 0, 0, Math.PI * 2);
+      x.fill();
+      x.restore();
+    }
+
+    x.restore();
+  }
+
   /** Hands sit behind the body — drawn before it, in world coordinates. */
   private drawHandsBehind(
     x: CanvasRenderingContext2D,
@@ -1154,3 +1392,6 @@ function rrPoint(ca: number, sa: number, W: number, H: number, cr: number): { x:
   }
   return { x: kx * W, y: ky * H };
 }
+
+export { BotEngine as MochiEngine };
+

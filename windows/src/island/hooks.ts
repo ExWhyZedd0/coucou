@@ -6,6 +6,7 @@
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { DiffEngine, makeDiffStep, type FileDiff } from "../core/diff";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
@@ -23,6 +24,7 @@ interface HookPayload {
   prompt?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  last_assistant_message?: string;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
 }
@@ -120,6 +122,70 @@ function approvalTarget(tool: string, input: Record<string, unknown>): string {
   return tool;
 }
 
+function buildFileDiff(tool: string, input: Record<string, unknown>): FileDiff | null {
+  if (tool === "Edit") {
+    const oldStr = typeof input.old_string === "string" ? input.old_string : "";
+    const newStr = typeof input.new_string === "string" ? input.new_string : "";
+    const path = typeof input.file_path === "string" ? input.file_path : "";
+    if (!path || (!oldStr && !newStr)) return null;
+    const d = DiffEngine.fromEdit(oldStr, newStr, path);
+    return d.added > 0 || d.removed > 0 ? d : null;
+  }
+  if (tool === "MultiEdit") {
+    const path = typeof input.file_path === "string" ? input.file_path : "";
+    const edits = Array.isArray(input.edits) ? input.edits : [];
+    if (!path || edits.length === 0) return null;
+    let totalAdded = 0;
+    let totalRemoved = 0;
+    const allHunks = [];
+    let anyLarge = false;
+    for (const edit of edits) {
+      if (typeof edit !== "object" || !edit) continue;
+      const oldStr = typeof (edit as Record<string, unknown>).old_string === "string" ? (edit as Record<string, unknown>).old_string as string : "";
+      const newStr = typeof (edit as Record<string, unknown>).new_string === "string" ? (edit as Record<string, unknown>).new_string as string : "";
+      const d = DiffEngine.fromEdit(oldStr, newStr, path);
+      totalAdded += d.added;
+      totalRemoved += d.removed;
+      allHunks.push(...d.hunks);
+      if (d.tooLarge) anyLarge = true;
+    }
+    if (totalAdded === 0 && totalRemoved === 0) return null;
+    return {
+      id: 0,
+      path,
+      name: path.split(/[\\/]/).pop() || path,
+      added: totalAdded,
+      removed: totalRemoved,
+      hunks: allHunks,
+      tooLarge: anyLarge,
+      isNewFile: false,
+    };
+  }
+  if (tool === "Write") {
+    const path = typeof input.file_path === "string" ? input.file_path : "";
+    const content = typeof input.content === "string" ? input.content : "";
+    if (!path || !content) return null;
+    const d = DiffEngine.fromNew(content, path);
+    return d.added > 0 || d.removed > 0 ? d : null;
+  }
+  if (tool === "replace_file_content") {
+    const oldStr = typeof input.TargetContent === "string" ? input.TargetContent : "";
+    const newStr = typeof input.ReplacementContent === "string" ? input.ReplacementContent : "";
+    const path = typeof input.TargetFile === "string" ? input.TargetFile : "";
+    if (!path || (!oldStr && !newStr)) return null;
+    const d = DiffEngine.fromEdit(oldStr, newStr, path);
+    return d.added > 0 || d.removed > 0 ? d : null;
+  }
+  if (tool === "write_to_file") {
+    const path = typeof input.TargetFile === "string" ? input.TargetFile : "";
+    const content = typeof input.CodeContent === "string" ? input.CodeContent : "";
+    if (!path || !content) return null;
+    const d = DiffEngine.fromNew(content, path);
+    return d.added > 0 || d.removed > 0 ? d : null;
+  }
+  return null;
+}
+
 function upsert(projectName: string, cwd: string) {
   const t = State.tasks.find((x) => x.id === CLAUDE_ID);
   if (!t) return;
@@ -129,15 +195,34 @@ function upsert(projectName: string, cwd: string) {
 
 function clearSession() {
   const t = State.tasks.find((x) => x.id === CLAUDE_ID);
-  if (!t) return;
-  t.steps = [];
-  t.stepIndex = 0;
-  t.name = "VS Code";
-  t.pillBadge = null;
+  if (t) {
+    t.steps = [];
+    t.stepIndex = 0;
+    t.name = "VS Code";
+    t.pillBadge = null;
+  }
+  State.activeDiff = null;
+  State.diffHistory = [];
 }
 
 export function registerHookHandlers(island: Island) {
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
+  void onEvent<{ request_id: string; decision: string }>("approval-resolved", (data) => {
+    if (State.pendingApproval && State.pendingApproval.requestId === data.request_id) {
+      if (pendingTimeout != null) {
+        window.clearTimeout(pendingTimeout);
+        pendingTimeout = null;
+      }
+      Sound.play(data.decision === "allow" ? "approve" : "blip");
+      State.pendingApproval = null;
+      State.isPinned = false;
+      island.dropPin();
+      State.updateTask(CLAUDE_ID, "working");
+      State.setPillBadge(CLAUDE_ID, null);
+      if (State.view === "approval") island.setView(State.defaultView());
+      State.notify();
+    }
+  });
 }
 
 function handleHook(island: Island, payload: HookPayload) {
@@ -208,9 +293,18 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
     }
 
-    case "PostToolUse":
+    case "PostToolUse": {
       State.updateTask(agentId, "working");
+      const tool = payload.tool_name ?? "";
+      const input = payload.tool_input ?? {};
+      const diff = buildFileDiff(tool, input);
+      if (diff) {
+        const diffId = State.appendSessionDiff(diff);
+        const step = makeDiffStep(diff.name, diff.added, diff.removed, diffId);
+        State.appendStep(agentId, step);
+      }
       break;
+    }
 
     case "PostToolUseFailure":
       State.updateTask(agentId, "working");
@@ -230,9 +324,11 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
     }
 
-    case "Stop":
+    case "Stop": {
       State.updateTask(agentId, "finished");
-      if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
+      const rawFinal = payload.last_assistant_message ?? payload.message ?? "";
+      const finalText = DiffEngine.toOneLine(rawFinal, 60);
+      if (finalText) State.appendStep(agentId, finalText);
       Sound.play("finish");
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
@@ -245,6 +341,7 @@ function handleHook(island: Island, payload: HookPayload) {
         }
       }, 5200);
       break;
+    }
 
     case "StopFailure":
       State.updateTask(agentId, "error");
@@ -260,6 +357,7 @@ function handleHook(island: Island, payload: HookPayload) {
         State.updateTask(agentId, "idle");
         clearSession();
       }
+      State.activeDiff = null;
       break;
 
     case "SubagentStart":

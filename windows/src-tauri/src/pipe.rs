@@ -197,6 +197,9 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
 
     if event != "PermissionRequest" {
         log::line(format!("hook {event}"));
+        if let Some(bridge) = app.try_state::<std::sync::Arc<crate::sync::SyncBridge>>() {
+            bridge.handle_hook_event(&event, &payload);
+        }
         let _ = app.emit_to(WINDOW_LABEL, "hook", payload);
         pipe.finish();
         return;
@@ -210,10 +213,44 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
     }
     payload["request_id"] = json!(id);
     log::line(format!("hook PermissionRequest id={id}"));
+
+    if let Some(bridge) = app.try_state::<std::sync::Arc<crate::sync::SyncBridge>>() {
+        let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or("Tool").to_string();
+        let cmd = payload
+            .get("tool_input")
+            .and_then(|i| {
+                i.get("command")
+                    .or_else(|| i.get("file_path"))
+                    .or_else(|| i.get("path"))
+                    .or_else(|| i.get("query"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let summary = if cmd.is_empty() { tool.clone() } else { format!("{tool} · {cmd}") };
+        let req = crate::sync::protocol::ApprovalRequestData {
+            request_id: id.clone(),
+            session_id: payload.get("session_id").and_then(Value::as_str).unwrap_or("").to_string(),
+            tool,
+            command: summary,
+            fingerprint: id.clone(),
+            created_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        };
+        bridge.server_state.set_approval_request(req);
+        // If companion mobile devices are connected, acknowledge so mobile user has time to act
+        if !bridge.server_state.get_connected_devices().is_empty() {
+            acknowledge(&app, &id);
+        }
+    }
+
     let _ = app.emit_to(WINDOW_LABEL, "hook", payload);
 
     let decision = wait_for_decision(&id, &mut rx).await;
     app.state::<Pending>().0.lock().unwrap().remove(&id);
+
+    if let Some(bridge) = app.try_state::<std::sync::Arc<crate::sync::SyncBridge>>() {
+        bridge.server_state.clear_approval_request(&id);
+    }
 
     // No decision: say nothing at all. coucou-hook then writes nothing to stdout
     // and Claude Code asks in the terminal, exactly as if Coucou were closed.
@@ -244,20 +281,30 @@ async fn wait_for_decision(id: &str, rx: &mut mpsc::Receiver<Reply>) -> Option<S
         }
     }
 
-    match tokio::time::timeout(DECISION_TIMEOUT, rx.recv()).await {
-        Ok(Some(Reply::Decision(d))) => {
-            log::line(format!("hook id={id} answered {d}"));
-            Some(d)
-        }
-        Ok(Some(Reply::Decline)) => {
-            log::line(format!("hook id={id} released without a decision"));
-            None
-        }
-        _ => {
-            log::line(format!("hook id={id} timed out — terminal takes over"));
-            None
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < DECISION_TIMEOUT {
+        let remaining = DECISION_TIMEOUT - start.elapsed();
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(Reply::Decision(d))) => {
+                log::line(format!("hook id={id} answered {d}"));
+                return Some(d);
+            }
+            Ok(Some(Reply::Decline)) => {
+                log::line(format!("hook id={id} released without a decision"));
+                return None;
+            }
+            Ok(Some(Reply::Ack)) => {
+                // Secondary Ack (e.g. from desktop after mobile already acknowledged) — keep waiting
+                continue;
+            }
+            Ok(None) => return None,
+            Err(_) => {
+                log::line(format!("hook id={id} timed out — terminal takes over"));
+                return None;
+            }
         }
     }
+    None
 }
 
 fn send(app: &AppHandle, request_id: &str, reply: Reply, keep: bool) {
@@ -294,4 +341,11 @@ pub fn answer(app: &AppHandle, request_id: &str, decision: &str) {
     };
     log::line(format!("decision id={request_id} {word}"));
     send(app, request_id, Reply::Decision(word.to_string()), false);
+
+    // Notify desktop Island UI so it immediately clears the card
+    let _ = app.emit_to(
+        WINDOW_LABEL,
+        "approval-resolved",
+        json!({ "request_id": request_id, "decision": word }),
+    );
 }

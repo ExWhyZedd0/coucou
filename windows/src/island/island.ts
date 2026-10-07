@@ -17,8 +17,11 @@ import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from ".
 import { UploadCanvas } from "../upload/canvas";
 import { USC, UploadSeq } from "../upload/sequence";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { buildDiffModal, type DiffModalHost } from "../views/diff_modal";
 import { h } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
+import { VoiceSpeakerEngine } from "../voice/speaker";
+import { VoiceListenerEngine } from "../voice/listener";
 
 const BOT_OVERHANG = 40;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
@@ -50,6 +53,8 @@ export class Island {
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
   private uploadCanvas!: UploadCanvas;
+  private diffModal!: DiffModalHost;
+  actions!: ViewActions;
 
   private width = new Tracked(NOTCH_W);
   private height = new Tracked(0);
@@ -95,6 +100,12 @@ export class Island {
     this.wireInput();
     this.engine.onDizzy = () => this.handleDizzy();
     this.greeting.onComplete = () => this.fsm.greetComplete();
+    VoiceSpeakerEngine.setEngine(this.engine);
+    VoiceListenerEngine.onWake((_phrase, _trailing) => {
+      this.alert("prompt");
+      this.engine.triggerEmote("happy");
+      Sound.play("peek");
+    });
     State.subscribe(() => {
       this.dirty = true;
       this.ensureRunning();
@@ -128,6 +139,7 @@ export class Island {
           integration_calcom: "https://app.cal.com/bookings",
         };
         if (task.id === "integration_claude") void Bridge.openInVSCode(task.sessionCwd ?? null);
+        else if (task.id === "integration_music") this.setView("music");
         else if (task.id === "integration_n8n") void Bridge.openN8n();
         else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
       },
@@ -166,8 +178,12 @@ export class Island {
         State.notify();
       },
       openSettingsWindow: () => void Bridge.openSettingsWindow(),
+      openDiff: (diff) => {
+        this.diffModal.show(diff, () => {});
+      },
       blip: () => Sound.play("blip"),
     };
+    this.actions = actions;
 
     this.wakeStrip = h("div", { id: "wake-strip" });
     this.botGlow = h("div", { id: "bot-glow" });
@@ -175,6 +191,7 @@ export class Island {
     this.greetingCanvas = h("canvas", { id: "greeting-canvas" });
     this.miniGrid = h("div", { id: "mini-grid" });
     this.countdown = h("div", { id: "countdown" });
+    this.diffModal = buildDiffModal();
 
     this.header = buildHeader(actions);
     this.views = buildViews(actions, () => this.animateGeometry(false));
@@ -209,6 +226,7 @@ export class Island {
       this.botCanvas,
       this.miniGrid,
       this.countdown,
+      this.diffModal.el,
     );
 
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -544,6 +562,14 @@ export class Island {
       }
     });
 
+    this.islandEl.addEventListener("contextmenu", (e) => {
+      if (this.isBotHit(e.clientX, e.clientY)) {
+        e.preventDefault();
+        Sound.play("blip");
+        this.setView(State.view === "wardrobe" ? "overview" : "wardrobe");
+      }
+    });
+
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
       State.lastActivity = performance.now();
@@ -790,6 +816,11 @@ export class Island {
     const focus = State.focusTask;
     this.engine.bodyColor = focus?.isIntegration ? hexToRGB(focus.color) : null;
     this.engine.particleOverhang = BOT_OVERHANG;
+    this.engine.setOutfit(State.resolvedOutfit, true);
+    const dancing =
+      State.effectiveState === "dance" ||
+      (State.focusTask?.id === "integration_music" && State.stateOverride === "dance");
+    this.engine.setDancing(dancing);
     this.engine.lookX = this.lookX();
     this.engine.lookY = this.lookY();
     if (this.engine.morph > 0.3) {

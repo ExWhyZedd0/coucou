@@ -7,10 +7,11 @@
 // and any step that arrived mid-animation was dropped outright. Steps are now
 // queued instead, so a burst scrolls past rather than vanishing.
 
-import { h, svg } from "./dom";
+import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
 import { cubicBezier, clamp, lerp } from "../core/anim";
 import type { AgentTask } from "../core/state";
+import { isDiffStep, parseDiffStep } from "../core/diff";
 
 const ROW_H = 22;
 /** One step transition, milliseconds. */
@@ -49,10 +50,45 @@ function makeRow(): Row {
   return { el, chevron, check, shimmer, dim, text: "" };
 }
 
-function setText(row: Row, text: string) {
+function setText(row: Row, text: string, onDiffClick?: (diffId: number) => void) {
   if (row.text === text) return;
   row.text = text;
+
+  if (isDiffStep(text)) {
+    const parsed = parseDiffStep(text);
+    if (parsed) {
+      const renderContent = () => {
+        const wrap = h("span", { style: "display:inline-flex;align-items:center;gap:6px" });
+        wrap.append(h("span", { text: parsed.filename }));
+
+        const pill = h(
+          "button",
+          {
+            class: "ticker-diff-pill",
+            title: "View diff",
+            onclick: (e: Event) => {
+              e.stopPropagation();
+              onDiffClick?.(parsed.diffId);
+            },
+          },
+          parsed.added > 0 ? h("span", { class: "diff-add", text: `+${parsed.added}` }) : null,
+          parsed.removed > 0 ? h("span", { class: "diff-del", text: `−${parsed.removed}` }) : null,
+        );
+        wrap.append(pill);
+        return wrap;
+      };
+
+      clear(row.shimmer);
+      row.shimmer.append(renderContent());
+      clear(row.dim);
+      row.dim.append(renderContent());
+      return;
+    }
+  }
+
+  clear(row.shimmer);
   row.shimmer.textContent = text;
+  clear(row.dim);
   row.dim.textContent = text;
 }
 
@@ -72,6 +108,7 @@ function place(row: Row, y: number, phase: number, opacity: number) {
 
 export class Ticker {
   readonly el: HTMLElement;
+  private onDiffClick?: (diffId: number) => void;
   private a = makeRow(); // completed
   private b = makeRow(); // current
   private c = makeRow(); // incoming
@@ -79,7 +116,8 @@ export class Ticker {
   private startMs: number | null = null;
   private displayIndex = -1;
 
-  constructor() {
+  constructor(onDiffClick?: (diffId: number) => void) {
+    this.onDiffClick = onDiffClick;
     this.el = h("div", { class: "ticker" }, this.a.el, this.b.el, this.c.el);
     this.rest();
   }
@@ -102,8 +140,8 @@ export class Ticker {
     // First render: drop straight into place, no animation.
     if (this.displayIndex < 0) {
       this.displayIndex = idx;
-      setText(this.a, idx > 0 ? steps[idx - 1] : "…");
-      setText(this.b, steps[Math.max(idx, 0)]);
+      setText(this.a, idx > 0 ? steps[idx - 1] : "…", this.onDiffClick);
+      setText(this.b, steps[Math.max(idx, 0)], this.onDiffClick);
       this.rest();
       return;
     }
@@ -113,8 +151,8 @@ export class Ticker {
       this.queue = [];
       this.startMs = null;
       this.displayIndex = idx;
-      setText(this.a, idx > 0 ? steps[idx - 1] : "…");
-      setText(this.b, steps[Math.max(idx, 0)]);
+      setText(this.a, idx > 0 ? steps[idx - 1] : "…", this.onDiffClick);
+      setText(this.b, steps[Math.max(idx, 0)], this.onDiffClick);
       this.rest();
       return;
     }
@@ -130,7 +168,7 @@ export class Ticker {
   tick(nowMs: number) {
     if (this.startMs == null) {
       if (this.queue.length === 0) return;
-      setText(this.c, this.queue[0]);
+      setText(this.c, this.queue[0], this.onDiffClick);
       place(this.c, ROW_H * 2, 0, 0);
       this.startMs = nowMs;
     }
@@ -147,8 +185,8 @@ export class Ticker {
 
     // Commit: the current row becomes the completed one, the incoming row the
     // current one. Texts move, elements stay put — no reordering, no overlap.
-    setText(this.a, this.b.text);
-    setText(this.b, this.c.text);
+    setText(this.a, this.b.text, this.onDiffClick);
+    setText(this.b, this.c.text, this.onDiffClick);
     this.queue.shift();
     this.startMs = null;
     this.rest();
